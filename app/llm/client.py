@@ -1,7 +1,5 @@
-import os
-from typing import Type, TypeVar
-from app.llm.prompts import build_rag_prompt,build_question_prompt,SYSTEM_PROMPT
-from app.llm.structured_output import AnswerOutput, ClassificationOutput
+from typing import TypeVar
+from app.llm.prompts import SYSTEM_PROMPT
 from groq import Groq
 from pydantic import BaseModel
 from app.helpers.config import get_settings
@@ -13,22 +11,17 @@ T = TypeVar("T", bound=BaseModel)
 class LLMClient:
     def __init__(
         self,
-        api_key: get_settings().GROQ_API_KEY | None = None,
-        model: get_settings().GENERATION_MODEL_ID | None = None,
+        api_key: str | None = None,
+        model: str | None = None,
     ):
-        self.client = Groq(
-            api_key=api_key or os.getenv("GROQ_API_KEY")
-        )
-
-        self.model = model or os.getenv(
-            "GROQ_MODEL",
-            "openai/gpt-oss-120b",
-        )
+        settings = get_settings()
+        self.client = Groq(api_key=api_key or settings.GROQ_API_KEY)
+        self.model = model or settings.GENERATION_MODEL_ID or settings.GROQ_MODEL
 
     def generate(
         self,
-        prompt: build_rag_prompt | build_question_prompt,
-        system_prompt: SYSTEM_PROMPT,
+        prompt: str,
+        system_prompt: str = SYSTEM_PROMPT,
     ) -> str:
         messages = []
 
@@ -53,8 +46,8 @@ class LLMClient:
     def generate_structured(
         self,
         prompt: str,
-        output_schema: AnswerOutput | ClassificationOutput,
-        system_prompt: SYSTEM_PROMPT,
+        output_schema: type[T],
+        system_prompt: str = SYSTEM_PROMPT,
     ) -> T:
         messages = []
 

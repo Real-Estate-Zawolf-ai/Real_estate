@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str | None = None
     GEMINI_LIVE_MODEL: str = "gemini-3.1-flash-live-preview"
     GEMINI_VOICE: str = "Aoede"
+    WHATSAPP_VERIFY_TOKEN: str | None = None
+    WHATSAPP_APP_SECRET: str | None = None
+    WHATSAPP_ACCESS_TOKEN: str | None = None
+    WHATSAPP_PHONE_NUMBER_ID: str | None = None
     OPENAI_API_KEY: str | None = None
     OPENAI_API_URL: str | None = None
     COHERE_API_KEY: str | None = None
