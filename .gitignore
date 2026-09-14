@@ -14,6 +14,7 @@ htmlcov/
 venv/
 env/
 ENV/
+.env/
 
 # Build and packaging artifacts
 build/
@@ -43,3 +44,4 @@ logs/
 .DS_Store
 Thumbs.db
 Desktop.ini
+.env
