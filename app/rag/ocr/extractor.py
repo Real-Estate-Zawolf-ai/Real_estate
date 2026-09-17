@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from app.rag.ocr.base import BaseOCRProvider
 from app.rag.ocr.document_parser import DocumentParser
@@ -12,6 +13,9 @@ from app.rag.ocr.schemas import (
     OCRStatus,
     PageResult,
 )
+
+if TYPE_CHECKING:
+    from app.config import Settings
 
 logger = logging.getLogger(__name__)
 
@@ -42,26 +46,30 @@ class EasyOCRProvider(BaseOCRProvider):
         self.gpu = gpu
         self.model_storage_directory = model_storage_directory
         self._reader = None
+        self._lock = threading.Lock()
 
     def _get_reader(self):
+        """Lazy, thread-safe EasyOCR reader initialization (double-checked locking)."""
         if self._reader is None:
-            try:
-                import easyocr
-            except ImportError as exc:
-                raise ImportError(
-                    "easyocr is not installed. Please install it using 'pip install easyocr'."
-                ) from exc
+            with self._lock:
+                if self._reader is None:
+                    try:
+                        import easyocr
+                    except ImportError as exc:
+                        raise ImportError(
+                            "easyocr is not installed. Please install it using 'pip install easyocr'."
+                        ) from exc
 
-            logger.info(
-                "Initializing EasyOCR reader | languages=%s | gpu=%s",
-                self.languages,
-                self.gpu,
-            )
-            kwargs: dict[str, Any] = {"gpu": self.gpu}
-            if self.model_storage_directory:
-                kwargs["model_storage_directory"] = self.model_storage_directory
+                    logger.info(
+                        "Initializing EasyOCR reader | languages=%s | gpu=%s",
+                        self.languages,
+                        self.gpu,
+                    )
+                    kwargs: dict[str, Any] = {"gpu": self.gpu}
+                    if self.model_storage_directory:
+                        kwargs["model_storage_directory"] = self.model_storage_directory
 
-            self._reader = easyocr.Reader(self.languages, **kwargs)
+                    self._reader = easyocr.Reader(self.languages, **kwargs)
         return self._reader
 
     def is_available(self) -> bool:
@@ -124,7 +132,22 @@ class OCRExtractor:
         gpu: bool = False,
         min_confidence: float = 0.30,
         model_storage_directory: str | None = None,
+        settings: Settings | None = None,
     ) -> None:
+        # If a Settings object is provided, use its values as defaults
+        # but allow explicit kwargs to override.
+        if settings is not None:
+            languages = languages or settings.OCR_LANGUAGES
+            gpu = gpu if gpu else settings.OCR_GPU
+            min_confidence = (
+                min_confidence
+                if min_confidence != 0.30
+                else settings.OCR_MIN_CONFIDENCE
+            )
+            model_storage_directory = (
+                model_storage_directory or settings.OCR_MODEL_DIR
+            )
+
         self.languages = languages or ["ar", "en"]
         self.gpu = gpu
         self.provider = provider or EasyOCRProvider(
@@ -176,9 +199,11 @@ class OCRExtractor:
         try:
             from PIL import Image
             with Image.open(path) as img:
-                img.verify()
+                # Capture metadata BEFORE verify() — verify() invalidates the
+                # internal state of the image object.
                 metadata["image_format"] = img.format
                 metadata["image_size"] = img.size
+                img.verify()
         except ImportError:
             pass
         except Exception as exc:

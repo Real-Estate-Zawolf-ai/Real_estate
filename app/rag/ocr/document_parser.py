@@ -20,6 +20,7 @@ class DocumentParser:
         - Aggregation of detection blocks into coherent page text.
         - Average confidence calculation across recognized blocks.
         - Language detection hint ('ar', 'en', 'ar_en').
+        - Document-level final pass to clean cross-block artifacts.
     """
 
     def __init__(
@@ -88,7 +89,7 @@ class DocumentParser:
             if confidence < self.min_confidence:
                 logger.debug(
                     "Dropping low confidence detection | text=%s | conf=%.3f < min=%.3f",
-                    raw_text,
+                    raw_text[:50],
                     confidence,
                     self.min_confidence,
                 )
@@ -111,7 +112,12 @@ class DocumentParser:
 
         # Assemble full page text
         page_lines = [block.text for block in valid_blocks if block.text]
-        full_text = "\n".join(page_lines).strip()
+        raw_full_text = "\n".join(page_lines).strip()
+
+        # Document-level final pass: clean cross-block whitespace artifacts
+        # without altering meaning.  This catches broken words and extra
+        # whitespace that per-block processing cannot see.
+        full_text = self._final_document_pass(raw_full_text)
 
         # Compute page confidence
         avg_confidence = (
@@ -154,6 +160,32 @@ class DocumentParser:
             blocks=blocks,
             metadata=metadata or {},
         )
+
+    def _final_document_pass(self, text: str) -> str:
+        """
+        Lightweight document-level post-processing pass on assembled full text.
+
+        Handles cross-block artifacts that per-block processing cannot see:
+        - Collapses excessive blank lines.
+        - Strips trailing whitespace per line.
+        - Normalizes line boundaries.
+
+        Does NOT apply content-altering transformations to preserve meaning.
+        """
+        if not text:
+            return text
+
+        # Normalize line endings
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+
+        # Collapse 3+ consecutive newlines into double newlines
+        text = re.sub(r"\n{3,}", "\n\n", text)
+
+        # Strip trailing whitespace per line
+        lines = [line.rstrip() for line in text.split("\n")]
+        text = "\n".join(lines).strip()
+
+        return text
 
     @staticmethod
     def detect_language(text: str) -> str | None:

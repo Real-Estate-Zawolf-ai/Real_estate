@@ -41,9 +41,9 @@ class OCRPostProcessor:
         normalize_digits: bool = True,
         remove_noise: bool = True,
     ) -> None:
-        self.normalize_arabic = normalize_arabic
-        self.normalize_digits = normalize_digits
-        self.remove_noise = remove_noise
+        self._should_normalize_arabic = normalize_arabic
+        self._should_normalize_digits = normalize_digits
+        self._should_remove_noise = remove_noise
 
         logger.info(
             "OCRPostProcessor initialized | normalize_arabic=%s | normalize_digits=%s | remove_noise=%s",
@@ -76,15 +76,15 @@ class OCRPostProcessor:
             original_line = line
             line = self._clean_whitespace(line)
 
-            if self.normalize_arabic:
-                line = self._normalize_arabic(line)
+            if self._should_normalize_arabic:
+                line = self._apply_arabic_normalization(line)
 
-            if self.normalize_digits:
-                line = self._normalize_digits(line)
+            if self._should_normalize_digits:
+                line = self._apply_digit_normalization(line)
 
             line = self._normalize_punctuation(line)
 
-            if self.remove_noise:
+            if self._should_remove_noise:
                 line = self._remove_obvious_noise(line)
 
             line = self._clean_whitespace(line)
@@ -129,7 +129,7 @@ class OCRPostProcessor:
         return re.sub(r"[ \t]+", " ", text).strip()
 
     @staticmethod
-    def _normalize_arabic(text: str) -> str:
+    def _apply_arabic_normalization(text: str) -> str:
         """
         Normalize common Arabic character orthographic variants.
         Normalizes:
@@ -153,7 +153,7 @@ class OCRPostProcessor:
         return text
 
     @staticmethod
-    def _normalize_digits(text: str) -> str:
+    def _apply_digit_normalization(text: str) -> str:
         """
         Convert Eastern Arabic-Indic numerals (٠-٩) and Persian numerals (۰-۹)
         to Western Arabic digits (0-9) so that prices, phone numbers, and square meters
@@ -175,10 +175,10 @@ class OCRPostProcessor:
             "٪": "%",
             "٫": ".",  # Arabic decimal separator to standard period
             "٬": ",",  # Arabic thousands separator to comma
-            "“": '"',
-            "”": '"',
-            "‘": "'",
-            "’": "'",
+            "\u201c": '"',
+            "\u201d": '"',
+            "\u2018": "'",
+            "\u2019": "'",
         }
         for source, target in replacements.items():
             text = text.replace(source, target)

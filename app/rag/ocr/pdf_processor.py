@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-import io
 import logging
-import tempfile
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from app.rag.ocr.extractor import OCRExtractor
 from app.rag.ocr.schemas import OCRResult, OCRStatus, PageResult
+
+if TYPE_CHECKING:
+    from app.config import Settings
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,7 @@ class PDFOCRProcessor:
         - Runs OCR page-by-page.
         - Preserves page numbers, block coordinates, and aggregate confidence.
         - Avoids expensive OCR rendering if the PDF is already text-rich (unless force_ocr=True).
+        - Uses in-memory rendering when the provider supports ``read_image_bytes()``.
     """
 
     def __init__(
@@ -29,8 +31,20 @@ class PDFOCRProcessor:
         extractor: OCRExtractor | None = None,
         min_text_chars_per_page: int = 40,
         render_dpi: int = 300,
+        settings: Settings | None = None,
     ) -> None:
-        self.extractor = extractor or OCRExtractor()
+        # Wire settings if provided; explicit kwargs override.
+        if settings is not None:
+            min_text_chars_per_page = (
+                min_text_chars_per_page
+                if min_text_chars_per_page != 40
+                else settings.OCR_MIN_TEXT_CHARS_PER_PAGE
+            )
+            render_dpi = (
+                render_dpi if render_dpi != 300 else settings.OCR_RENDER_DPI
+            )
+
+        self.extractor = extractor or OCRExtractor(settings=settings)
         self.min_text_chars_per_page = min_text_chars_per_page
         self.render_dpi = render_dpi
 
@@ -51,19 +65,18 @@ class PDFOCRProcessor:
 
         try:
             import fitz  # PyMuPDF
-            doc = fitz.open(str(path))
-            total_pages = len(doc)
-            if total_pages == 0:
-                return True
+            with fitz.open(str(path)) as doc:
+                total_pages = len(doc)
+                if total_pages == 0:
+                    return True
 
-            total_chars = 0
-            for page in doc:
-                text = page.get_text() or ""
-                total_chars += len(text.strip())
+                total_chars = 0
+                for page in doc:
+                    text = page.get_text() or ""
+                    total_chars += len(text.strip())
 
-            doc.close()
-            avg_chars = total_chars / total_pages
-            return avg_chars < self.min_text_chars_per_page
+                avg_chars = total_chars / total_pages
+                return avg_chars < self.min_text_chars_per_page
         except ImportError:
             # Fallback to pypdf if fitz not installed
             try:
@@ -130,28 +143,26 @@ class PDFOCRProcessor:
                 metadata=metadata,
             )
 
-        total_pages = len(doc)
-        metadata["total_pages"] = total_pages
+        # Use context manager to guarantee resource cleanup.
+        with doc:
+            total_pages = len(doc)
+            metadata["total_pages"] = total_pages
 
-        if total_pages == 0:
-            doc.close()
-            return OCRResult(
-                source=str(path),
-                text="",
-                pages=[],
-                status=OCRStatus.EMPTY,
-                metadata=metadata,
-            )
+            if total_pages == 0:
+                return OCRResult(
+                    source=str(path),
+                    text="",
+                    pages=[],
+                    status=OCRStatus.EMPTY,
+                    metadata=metadata,
+                )
 
-        page_results: list[PageResult] = []
-        errors: list[str] = []
+            page_results: list[PageResult] = []
+            errors: list[str] = []
 
-        # Zoom matrix for high-quality rendering (default 300 DPI: 300/72 ≈ 4.166)
-        scale = self.render_dpi / 72.0
-        matrix = fitz.Matrix(scale, scale)
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_path = Path(temp_dir)
+            # Zoom matrix for high-quality rendering (default 300 DPI: 300/72 ≈ 4.166)
+            scale = self.render_dpi / 72.0
+            matrix = fitz.Matrix(scale, scale)
 
             for page_index in range(total_pages):
                 page_num = page_index + 1
@@ -174,36 +185,22 @@ class PDFOCRProcessor:
                     page_results.append(parsed_page)
                     continue
 
-                # Otherwise, render page to image and perform OCR
+                # Render page to image and perform OCR
                 logger.info("Rendering PDF page %d for OCR extraction", page_num)
                 try:
                     pixmap = page.get_pixmap(matrix=matrix, alpha=False)
-                    page_img_path = temp_path / f"page_{page_num}.png"
-                    pixmap.save(str(page_img_path))
 
-                    # Perform OCR on rendered image
-                    page_ocr_res = self.extractor.extract_from_image(
-                        image_path=page_img_path,
-                        extra_metadata={"page_number": page_num},
+                    # Use in-memory bytes to avoid unnecessary disk I/O.
+                    img_bytes = pixmap.tobytes("png")
+                    detections = self.extractor.provider.read_image_bytes(img_bytes)
+
+                    # Build page result from raw detections via the parser
+                    rendered_page_res = self.extractor.parser.parse_page(
+                        detections=detections,
+                        page_number=page_num,
+                        metadata={"source_page": page_num, "method": "scanned_ocr"},
                     )
-
-                    if page_ocr_res.pages:
-                        rendered_page_res = page_ocr_res.pages[0]
-                        rendered_page_res.page_number = page_num
-                        rendered_page_res.metadata["method"] = "scanned_ocr"
-                        page_results.append(rendered_page_res)
-                    else:
-                        page_results.append(
-                            PageResult(
-                                page_number=page_num,
-                                text="",
-                                confidence=0.0,
-                                metadata={"source_page": page_num, "method": "scanned_ocr"},
-                            )
-                        )
-
-                    if page_ocr_res.errors:
-                        errors.extend(page_ocr_res.errors)
+                    page_results.append(rendered_page_res)
 
                 except Exception as exc:
                     logger.exception("Failed to render/OCR PDF page %d: %s", page_num, exc)
@@ -216,8 +213,6 @@ class PDFOCRProcessor:
                             metadata={"error": str(exc)},
                         )
                     )
-
-        doc.close()
 
         # Combine all page texts
         all_texts = [p.text for p in page_results if p.text]
