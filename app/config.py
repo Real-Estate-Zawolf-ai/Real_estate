@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     DEBUG: bool = False
 
     # OCR Configuration
+    OCR_PROVIDER: str = "paddleocr"
     OCR_LANGUAGES: list[str] = ["ar", "en"]
     OCR_GPU: bool = False
     OCR_MIN_CONFIDENCE: float = 0.30
@@ -41,3 +42,4 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Return a cached instance of application settings."""
     return Settings()
+
