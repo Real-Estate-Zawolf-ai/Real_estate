@@ -1,11 +1,10 @@
-from pathlib import Path
 import logging
+from pathlib import Path
 
 from unstructured.partition.auto import partition
 
 
 logger = logging.getLogger(__name__)
-
 
 def parse_office(file_path: str) -> str:
     """
@@ -19,7 +18,6 @@ def parse_office(file_path: str) -> str:
 
     try:
         path = Path(file_path)
-
         if not path.exists():
             raise FileNotFoundError(
                 f"Office file not found: {file_path}"
