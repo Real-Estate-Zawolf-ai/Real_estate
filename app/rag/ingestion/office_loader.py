@@ -13,17 +13,48 @@ def parse_office(file_path: str) -> str:
     Unstructured automatically detects the document type
     and extracts its textual content.
     """
+
     logger.info("Starting Office document parsing: %s", file_path)
 
     try:
         path = Path(file_path)
         if not path.exists():
-            raise FileNotFoundError(f"Office file not found: {file_path}")
+            raise FileNotFoundError(
+                f"Office file not found: {file_path}"
+            )
+
         if path.suffix.lower() not in {".docx", ".pptx"}:
-            raise ValueError(f"Unsupported Office format: {path.suffix}")
+            raise ValueError(
+                f"Unsupported Office format: {path.suffix}"
+            )
 
         elements = partition(filename=str(path))
-        return "\n".join(str(element) for element in elements if str(element).strip())
+
+        full_text = "\n".join(
+            str(element).strip()
+            for element in elements
+            if str(element).strip()
+        )
+
+        if not full_text:
+            logger.warning(
+                "Unstructured returned empty text: %s",
+                file_path,
+            )
+        else:
+            logger.info(
+                "Office document parsed successfully: %s | "
+                "characters=%d | elements=%d",
+                file_path,
+                len(full_text),
+                len(elements),
+            )
+
+        return full_text
+
     except Exception:
-        logger.exception("Failed to parse Office document: %s", file_path)
+        logger.exception(
+            "Office document parsing failed: %s",
+            file_path,
+        )
         raise
