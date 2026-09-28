@@ -5,7 +5,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 
-from channels.whatsapp import (
+from ...channels.whatsapp import (
     extract_incoming_messages,
     is_valid_signature,
     verify_webhook_challenge,

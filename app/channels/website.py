@@ -8,7 +8,7 @@ from contextlib import suppress
 from fastapi import WebSocket, WebSocketDisconnect
 from google.genai import types
 
-from voice.gemini_live import connect_live_session
+from ..voice.gemini_live import connect_live_session
 
 
 logger = logging.getLogger(__name__)

@@ -10,7 +10,7 @@ import hashlib
 import hmac
 from typing import Any
 
-from helpers.config import get_settings
+from ..helpers.config import get_settings
 
 
 def verify_webhook_challenge(
