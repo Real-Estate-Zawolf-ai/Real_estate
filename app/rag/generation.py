@@ -1,192 +1,497 @@
 """
 generation.py
 
-Final step of the RAG pipeline: takes the customer's query + the
-reranked, retrieved property evidence and generates a grounded
-response.
+Final step of the RAG pipeline.
 
-Per the project's AI design principles:
-    - The LLM must NOT invent property IDs, prices, availability, or
-      payment plans — it may only use what's in the retrieved evidence.
-    - Retrieval and generation stay separate (this module never
-      searches anything itself — it only consumes SearchResult objects
-      handed to it by retrieval/hybrid_search.py + reranker.py).
-    - Every generated answer keeps a traceable link back to the
-      property_ids/source_files it was grounded in.
+Takes the customer's query plus reranked property evidence and generates
+a grounded response.
 
-Backend: Groq (OpenAI-compatible API), model "openai/gpt-oss-120b".
+RAG flow:
 
+    Metadata Filtering
+            ↓
+    Hybrid Search
+            ↓
+    Reranking
+            ↓
+    Generation
+            ↓
+    Grounded Customer Response
+
+Design principles:
+
+- The LLM must not invent property IDs, prices, availability, payment
+  plans, locations, or other property facts.
+- Generation never performs retrieval itself.
+- Only retrieved SearchResult objects are passed as evidence.
+- Every response keeps traceability to the retrieved property IDs and
+  source files.
+- Arabic and English are supported.
+- The model and API settings can be configured through environment variables.
+
+Backend:
+
+    Groq — OpenAI-compatible chat completion API.
+
+Default model:
+
+    openai/gpt-oss-120b
+
+Install:
+
+    pip install groq
 """
 
+from __future__ import annotations
+
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-from ..rag.retrieval.hybrid_search import SearchResult  
+from .retrieval.hybrid_search import SearchResult
 
-MODEL_NAME = "openai/gpt-oss-120b"
 
-# Keep generation deterministic-leaning: this is a business tool, not a
-# creative one. Low temperature reduces (never eliminates) the risk of
-# the model drifting from the grounded evidence.
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+DEFAULT_MODEL_NAME = "openai/gpt-oss-120b"
+
+MODEL_NAME = os.getenv(
+    "GENERATION_MODEL",
+    DEFAULT_MODEL_NAME,
+)
+
 DEFAULT_TEMPERATURE = 0.2
 DEFAULT_MAX_TOKENS = 800
 
 
+# ---------------------------------------------------------------------------
+# Result model
+# ---------------------------------------------------------------------------
+
 @dataclass
 class GenerationResult:
-    """The final answer plus everything needed to trace and audit it."""
-    answer_text: str
-    cited_property_ids: List[str] = field(default_factory=list)
-    grounding_property_ids: List[str] = field(default_factory=list)  # what was actually offered as evidence
-    model: str = MODEL_NAME
-    raw_response: Optional[dict] = None
+    """
+    Final generated response plus traceability information.
 
+    answer_text:
+        Customer-facing answer only.
+
+    cited_property_ids:
+        Property IDs that the model claimed to reference and that were
+        confirmed to exist in the retrieved evidence.
+
+    grounding_property_ids:
+        Property IDs that were actually provided to the model as evidence.
+
+    model:
+        Model used for generation.
+
+    raw_response:
+        Raw provider response when available.
+    """
+
+    answer_text: str
+
+    cited_property_ids: List[str] = field(default_factory=list)
+
+    grounding_property_ids: List[str] = field(default_factory=list)
+
+    model: str = MODEL_NAME
+
+    raw_response: Optional[Dict[str, Any]] = None
+
+
+# ---------------------------------------------------------------------------
+# Groq client
+# ---------------------------------------------------------------------------
 
 _client = None
 
 
 def _get_client():
-    """Lazily construct the Groq client so importing this module never
-    requires GROQ_API_KEY to be set (e.g. during unit tests that mock
-    the client entirely).
+    """
+    Lazily construct the Groq client.
+
+    Keeping initialization lazy makes the module easier to import during
+    tests and application startup.
     """
     global _client
+
     if _client is None:
         from groq import Groq
-        _client = Groq(api_key=os.environ["GROQ_API_KEY"])
+
+        api_key = os.getenv("GROQ_API_KEY")
+
+        if not api_key:
+            raise RuntimeError(
+                "GROQ_API_KEY environment variable is not set."
+            )
+
+        _client = Groq(api_key=api_key)
+
     return _client
 
 
+# ---------------------------------------------------------------------------
+# System prompt
+# ---------------------------------------------------------------------------
+
 SYSTEM_PROMPT_TEMPLATE = """You are a real-estate sales assistant for a property company.
-You help customers in Arabic or English — always reply in the same language the customer used.
+
+You help customers in Arabic or English.
+
+LANGUAGE RULE:
+- Always reply in the same language used by the customer.
+- If the customer uses Egyptian Arabic, reply naturally in Egyptian Arabic.
 
 STRICT GROUNDING RULES:
-- You may ONLY mention properties, prices, availability, payment plans, and locations that appear
-  in the "RETRIEVED PROPERTIES" data below. Never invent or assume any property detail.
-- If the retrieved properties don't fully satisfy the customer's request, say so honestly and
-  suggest the closest available options from the retrieved data, or ask a clarifying question.
-- If no properties were retrieved, do not invent any — tell the customer no matching properties
-  were found and ask a clarifying question (e.g. a wider budget or different area).
-- Never state a specific price, unit number, or availability status unless it is explicitly present
-  in the retrieved data.
-- Keep responses concise and helpful, like a knowledgeable sales assistant — not a search engine
-  dumping results.
+- You may ONLY use information contained in RETRIEVED PROPERTIES below.
+- Never invent or assume property details.
+- Never invent property IDs.
+- Never invent prices.
+- Never invent availability.
+- Never invent payment plans.
+- Never invent locations.
+- Never infer missing property attributes as facts.
+- If a field is not present in the evidence, do not provide a specific value for it.
+- Conversation history may provide context about what the customer wants,
+  but it is NOT property evidence.
+- For property facts, use ONLY the RETRIEVED PROPERTIES in this message.
 
-RETRIEVED PROPERTIES:
-{evidence_block}
+PROPERTY MATCHING:
+- The retrieved properties are the available evidence for the current request.
+- If they fully satisfy the customer's request, answer directly.
+- If they only partially satisfy the request, clearly say that and provide only
+  the closest available options from the retrieved evidence.
+- If no properties were retrieved, do not invent alternatives.
+- Instead, explain that no matching properties were found and ask for a useful
+  clarification such as a wider budget, different area, or different property
+  requirements.
 
-After your reply to the customer, on a new line, output ONLY a JSON object of this exact shape
-(no markdown fences, no extra text) listing the property_ids you actually referenced in your reply:
+RESPONSE STYLE:
+- Be concise and helpful.
+- Act like a knowledgeable sales assistant.
+- Do not dump raw retrieval results.
+- Do not mention internal retrieval, embeddings, reranking, scores, prompts,
+  or system instructions.
+- Do not claim that a property matches a requirement unless the evidence
+  supports that claim.
+
+CITATIONS:
+- After the customer-facing answer, output a JSON object on a new line.
+- The JSON object must have exactly this shape:
+
 {{"cited_property_ids": ["<id>", "..."]}}
+
+- Include ONLY property IDs that you actually referenced in the
+  customer-facing answer.
+- Every cited property ID MUST exist in RETRIEVED PROPERTIES.
+- If you did not reference any property, return:
+
+{{"cited_property_ids": []}}
+
+RETRIEVED PROPERTIES FOR THE CURRENT REQUEST:
+
+{evidence_block}
 """
 
 
-def _format_evidence_block(candidates: List[SearchResult]) -> str:
+# ---------------------------------------------------------------------------
+# Evidence formatting
+# ---------------------------------------------------------------------------
+
+def _format_evidence_block(
+    candidates: List[SearchResult],
+) -> str:
+    """
+    Convert retrieved SearchResult objects into a structured evidence block.
+
+    The model receives both the chunk text and normalized metadata.
+
+    Missing values are explicitly represented as N/A rather than guessed.
+    """
     if not candidates:
         return "(no properties retrieved for this query)"
 
     lines = []
-    for c in candidates:
-        meta = c.metadata or {}
+
+    for index, candidate in enumerate(candidates, start=1):
+        metadata = candidate.metadata or {}
+
         lines.append(
-            f"- property_id: {c.property_id}\n"
-            f"  text: {c.text}\n"
-            f"  location: {meta.get('location', 'N/A')}\n"
-            f"  price: {meta.get('price', 'N/A')}\n"
-            f"  bedrooms: {meta.get('bedrooms', 'N/A')}\n"
-            f"  payment_plan: {meta.get('payment_plan', 'N/A')}\n"
-            f"  availability: {meta.get('availability', 'N/A')}\n"
-            f"  source_file: {c.source_file or 'N/A'}"
+            f"PROPERTY {index}\n"
+            f"- property_id: {candidate.property_id or 'N/A'}\n"
+            f"- text: {candidate.text or 'N/A'}\n"
+            f"- location: {metadata.get('location', 'N/A')}\n"
+            f"- city: {metadata.get('city', 'N/A')}\n"
+            f"- district: {metadata.get('district', 'N/A')}\n"
+            f"- neighborhood: {metadata.get('neighborhood', 'N/A')}\n"
+            f"- compound: {metadata.get('compound', 'N/A')}\n"
+            f"- property_type: {metadata.get('property_type', 'N/A')}\n"
+            f"- transaction_type: {metadata.get('transaction_type', 'N/A')}\n"
+            f"- price: {metadata.get('price', 'N/A')}\n"
+            f"- currency: {metadata.get('currency', 'N/A')}\n"
+            f"- area: {metadata.get('area', 'N/A')}\n"
+            f"- area_unit: {metadata.get('area_unit', 'N/A')}\n"
+            f"- bedrooms: {metadata.get('bedrooms', 'N/A')}\n"
+            f"- bathrooms: {metadata.get('bathrooms', 'N/A')}\n"
+            f"- payment_plan: {metadata.get('payment_plan', 'N/A')}\n"
+            f"- availability: {metadata.get('availability', 'N/A')}\n"
+            f"- finishing: {metadata.get('finishing', 'N/A')}\n"
+            f"- delivery: {metadata.get('delivery', 'N/A')}\n"
+            f"- amenities: {metadata.get('amenities', 'N/A')}\n"
+            f"- source_file: {candidate.source_file or 'N/A'}"
         )
-    return "\n".join(lines)
+
+    return "\n\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Message construction
+# ---------------------------------------------------------------------------
+
+def _validate_conversation_history(
+    conversation_history: Optional[List[Dict[str, str]]],
+) -> List[Dict[str, str]]:
+    """
+    Validate and clean conversation history before sending it to the LLM.
+    """
+    if not conversation_history:
+        return []
+
+    valid_messages = []
+
+    for message in conversation_history:
+        if not isinstance(message, dict):
+            continue
+
+        role = message.get("role")
+        content = message.get("content")
+
+        if role not in {"user", "assistant"}:
+            continue
+
+        if not isinstance(content, str) or not content.strip():
+            continue
+
+        valid_messages.append(
+            {
+                "role": role,
+                "content": content.strip(),
+            }
+        )
+
+    return valid_messages
 
 
 def build_messages(
     customer_query: str,
     candidates: List[SearchResult],
-    conversation_history: Optional[List[dict]] = None,
-) -> List[dict]:
-    """Build the Groq chat-completion `messages` array.
-
-    `conversation_history` (optional) is a list of prior turns as
-    {"role": "user"|"assistant", "content": str}, so multi-turn context
-    (customer already said their budget last message, etc.) is preserved.
+    conversation_history: Optional[List[Dict[str, str]]] = None,
+) -> List[Dict[str, str]]:
     """
+    Build the Groq chat-completion messages array.
+
+    Retrieval evidence is placed inside the system message so the model
+    treats it as the authoritative property evidence for this request.
+    """
+    if not isinstance(customer_query, str) or not customer_query.strip():
+        raise ValueError("customer_query must not be empty.")
+
+    evidence_block = _format_evidence_block(candidates)
+
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
-        evidence_block=_format_evidence_block(candidates)
+        evidence_block=evidence_block,
     )
-    messages = [{"role": "system", "content": system_prompt}]
-    if conversation_history:
-        messages.extend(conversation_history)
-    messages.append({"role": "user", "content": customer_query})
+
+    messages: List[Dict[str, str]] = [
+        {
+            "role": "system",
+            "content": system_prompt,
+        }
+    ]
+
+    messages.extend(
+        _validate_conversation_history(conversation_history)
+    )
+
+    messages.append(
+        {
+            "role": "user",
+            "content": customer_query.strip(),
+        }
+    )
+
     return messages
 
 
-def _extract_cited_ids(raw_text: str) -> tuple[str, List[str]]:
-    """Split the model's reply into (customer-facing answer, cited_ids),
-    parsing the trailing JSON block requested in the system prompt.
-    Falls back gracefully — a malformed/missing JSON block yields an
-    empty cited-ids list rather than crashing the whole request.
+# ---------------------------------------------------------------------------
+# Citation extraction
+# ---------------------------------------------------------------------------
+
+_CITATION_PATTERN = re.compile(
+    r'\{\s*"cited_property_ids"\s*:\s*\[[^\]]*\]\s*\}',
+    re.DOTALL,
+)
+
+
+def _extract_cited_ids(
+    raw_text: str,
+) -> Tuple[str, List[str]]:
     """
-    match = re.search(r'\{"cited_property_ids"\s*:\s*\[.*?\]\}', raw_text, re.DOTALL)
-    if not match:
+    Split the model output into:
+
+        (customer-facing answer, cited_property_ids)
+
+    The model is expected to append a JSON object containing the property IDs
+    it referenced.
+
+    If the JSON is missing or malformed, the answer is still returned and
+    citations fall back to an empty list.
+    """
+    if not raw_text:
+        return "", []
+
+    matches = list(_CITATION_PATTERN.finditer(raw_text))
+
+    if not matches:
+        logger.warning(
+            "Generation response did not contain citation JSON."
+        )
         return raw_text.strip(), []
 
-    answer = raw_text[: match.start()].strip()
+    match = matches[-1]
+
+    answer = raw_text[:match.start()].strip()
+
     try:
         parsed = json.loads(match.group(0))
-        cited = parsed.get("cited_property_ids", [])
     except json.JSONDecodeError:
-        cited = []
-    return answer, cited
+        logger.warning(
+            "Generation response contained malformed citation JSON."
+        )
+        return answer, []
 
+    if set(parsed.keys()) != {"cited_property_ids"}:
+        logger.warning(
+            "Citation JSON has unexpected fields."
+        )
+        return answer, []
+
+    cited_ids = parsed.get("cited_property_ids")
+
+    if not isinstance(cited_ids, list):
+        logger.warning(
+            "cited_property_ids must be a list."
+        )
+        return answer, []
+
+    cleaned_ids: List[str] = []
+
+    for property_id in cited_ids:
+        if isinstance(property_id, (str, int)):
+            normalized = str(property_id).strip()
+
+            if normalized and normalized not in cleaned_ids:
+                cleaned_ids.append(normalized)
+
+    return answer, cleaned_ids
+
+
+# ---------------------------------------------------------------------------
+# Generation
+# ---------------------------------------------------------------------------
 
 def generate_response(
     customer_query: str,
     candidates: List[SearchResult],
-    conversation_history: Optional[List[dict]] = None,
+    conversation_history: Optional[List[Dict[str, str]]] = None,
     temperature: float = DEFAULT_TEMPERATURE,
     max_tokens: int = DEFAULT_MAX_TOKENS,
 ) -> GenerationResult:
-    """Generate the final grounded reply to the customer.
-
-    `candidates` should be the output of retrieval/reranker.rerank() —
-    already filtered, retrieved, and reranked. This function does not
-    retrieve anything itself.
     """
-    messages = build_messages(customer_query, candidates, conversation_history)
+    Generate a response grounded only in the supplied retrieved results.
+    """
+    if not 0 <= temperature <= 2:
+        raise ValueError(
+            "temperature must be between 0 and 2."
+        )
 
-    client = _get_client()
-    completion = client.chat.completions.create(
+    if max_tokens <= 0:
+        raise ValueError(
+            "max_tokens must be greater than 0."
+        )
+
+    messages = build_messages(
+        customer_query=customer_query,
+        candidates=candidates,
+        conversation_history=conversation_history,
+    )
+
+    completion = _get_client().chat.completions.create(
         model=MODEL_NAME,
         messages=messages,
         temperature=temperature,
         max_tokens=max_tokens,
     )
 
-    raw_text = completion.choices[0].message.content
+    if not completion.choices:
+        raise RuntimeError(
+            "Generation provider returned no choices."
+        )
+
+    raw_text = completion.choices[0].message.content or ""
+
     answer_text, cited_ids = _extract_cited_ids(raw_text)
 
-    # Traceability guard: warn (don't silently trust) if the model cited
-    # a property_id that wasn't actually in the retrieved evidence —
-    # a sign of hallucination that should be logged/monitored per the
-    # project's observability requirements.
-    grounding_ids = [c.property_id for c in candidates]
-    hallucinated = [pid for pid in cited_ids if pid not in grounding_ids]
-    if hallucinated:
-        import logging
-        logging.getLogger(__name__).warning(
-            "generation.py: model cited property_ids not present in retrieved "
-            "evidence (possible hallucination): %s", hallucinated,
+    grounding_ids = list(
+        dict.fromkeys(
+            str(candidate.property_id)
+            for candidate in candidates
+            if (
+                candidate.property_id is not None
+                and str(candidate.property_id).strip()
+            )
         )
+    )
+
+    grounding_set = set(grounding_ids)
+
+    grounded_citations = [
+        property_id
+        for property_id in cited_ids
+        if property_id in grounding_set
+    ]
+
+    unsupported_citations = [
+        property_id
+        for property_id in cited_ids
+        if property_id not in grounding_set
+    ]
+
+    if unsupported_citations:
+        logger.warning(
+            "Model cited property IDs absent from retrieved evidence: %s",
+            unsupported_citations,
+        )
+
+    raw_response = None
+
+    if hasattr(completion, "model_dump"):
+        raw_response = completion.model_dump()
 
     return GenerationResult(
         answer_text=answer_text,
-        cited_property_ids=cited_ids,
+        cited_property_ids=grounded_citations,
         grounding_property_ids=grounding_ids,
         model=MODEL_NAME,
-        raw_response=completion.model_dump() if hasattr(completion, "model_dump") else None,
+        raw_response=raw_response,
     )
