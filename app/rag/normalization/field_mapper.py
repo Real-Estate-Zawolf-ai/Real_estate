@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -27,12 +28,8 @@ class FieldMappingResult:
     """
 
     mapped: dict[str, Any] = field(default_factory=dict)
-
     unmapped: dict[str, Any] = field(default_factory=dict)
-
-    mapping_trace: dict[str, str] = field(
-        default_factory=dict
-    )
+    mapping_trace: dict[str, str] = field(default_factory=dict)
 
 
 class FieldMapper:
@@ -44,8 +41,9 @@ class FieldMapper:
         {
             "beds": 3,
             "baths": 2,
-            "sqft": 1500,
-            "property_category": "Apartment"
+            "area_sqm": 1500,
+            "property_category": "Apartment",
+            "price_egp": 5000000
         }
 
     becomes:
@@ -54,7 +52,8 @@ class FieldMapper:
             "bedrooms": 3,
             "bathrooms": 2,
             "area": 1500,
-            "property_type": "apartment"
+            "property_type": "Apartment",
+            "price": 5000000
         }
 
     Responsibilities:
@@ -76,7 +75,6 @@ class FieldMapper:
     # ------------------------------------------------------------------
 
     FIELD_ALIASES: dict[str, set[str]] = {
-
         "property_id": {
             "property_id",
             "propertyid",
@@ -116,6 +114,8 @@ class FieldMapper:
 
         "price": {
             "price",
+            "price_egp",
+            "price_usd",
             "property_price",
             "propertyprice",
             "listing_price",
@@ -139,6 +139,9 @@ class FieldMapper:
 
         "area": {
             "area",
+            "area_sqm",
+            "area_sq_m",
+            "area_m2",
             "property_area",
             "propertyarea",
             "unit_area",
@@ -153,6 +156,7 @@ class FieldMapper:
             "square_meters",
             "squaremeters",
             "built_up_area",
+            "builtup_area",
             "bua",
         },
 
@@ -198,6 +202,7 @@ class FieldMapper:
             "property_address",
             "propertyaddress",
             "area_location",
+            "location_area",
             "place",
         },
 
@@ -205,12 +210,16 @@ class FieldMapper:
             "city",
             "city_name",
             "cityname",
+            "location_governorate",
+            "governorate",
+            "governorate_name",
         },
 
         "district": {
             "district",
             "district_name",
             "districtname",
+            "location_district",
             "area_name",
             "areaname",
         },
@@ -353,7 +362,6 @@ class FieldMapper:
         *,
         preserve_unknown: bool = True,
     ) -> None:
-
         self.preserve_unknown = preserve_unknown
 
         self._alias_to_canonical = (
@@ -383,7 +391,8 @@ class FieldMapper:
             {
                 "Beds": 3,
                 "Baths": 2,
-                "Sqft": 1500
+                "Area_sqm": 1500,
+                "Price_EGP": 5000000
             }
 
         becomes:
@@ -391,7 +400,8 @@ class FieldMapper:
             {
                 "bedrooms": 3,
                 "bathrooms": 2,
-                "area": 1500
+                "area": 1500,
+                "price": 5000000
             }
         """
 
@@ -399,23 +409,18 @@ class FieldMapper:
             logger.warning(
                 "Field mapping skipped: empty input"
             )
-
             return FieldMappingResult()
 
         mapped: dict[str, Any] = {}
-
         unmapped: dict[str, Any] = {}
-
         mapping_trace: dict[str, str] = {}
 
         for source_field, value in fields.items():
-
             canonical_field = self.map_field_name(
                 source_field
             )
 
             if canonical_field is None:
-
                 if self.preserve_unknown:
                     unmapped[source_field] = value
 
@@ -423,14 +428,12 @@ class FieldMapper:
                     "Field not mapped | source_field=%s",
                     source_field,
                 )
-
                 continue
 
             # Avoid silently overwriting a field when
             # multiple source fields map to the same
             # canonical field.
             if canonical_field in mapped:
-
                 logger.warning(
                     "Duplicate canonical field detected | "
                     "canonical=%s | source=%s",
@@ -438,18 +441,33 @@ class FieldMapper:
                     source_field,
                 )
 
-                # Preserve the second value in extra
-                # rather than silently deleting it.
                 if self.preserve_unknown:
                     unmapped[source_field] = value
 
                 continue
 
             mapped[canonical_field] = value
+            mapping_trace[source_field] = canonical_field
 
-            mapping_trace[source_field] = (
-                canonical_field
-            )
+        # --------------------------------------------------------------
+        # Deterministic location fallback
+        # --------------------------------------------------------------
+        #
+        # Some property datasets provide:
+        #
+        #   location_area = null
+        #   location_district = "Sheikh Zayed"
+        #
+        # In that case, there is no direct location value.
+        # Using the district as the broader location is a deterministic
+        # fallback based on an existing canonical field.
+        #
+        if (
+            mapped.get("location") is None
+            and mapped.get("district")
+        ):
+            mapped["location"] = mapped["district"]
+            mapping_trace["district"] = "location_fallback"
 
         logger.info(
             "Field mapping completed | "
@@ -480,9 +498,7 @@ class FieldMapper:
             return None
 
         normalized_name = (
-            self._normalize_field_name(
-                field_name
-            )
+            self._normalize_field_name(field_name)
         )
 
         return self._alias_to_canonical.get(
@@ -536,7 +552,7 @@ class FieldMapper:
         """
         Build:
 
-            normalized alias → canonical field
+            normalized alias -> canonical field
         """
 
         alias_index: dict[str, str] = {}
@@ -544,17 +560,13 @@ class FieldMapper:
         for canonical_field, aliases in (
             self.FIELD_ALIASES.items()
         ):
-
             # Canonical field itself is always accepted.
             all_aliases = set(aliases)
             all_aliases.add(canonical_field)
 
             for alias in all_aliases:
-
                 normalized_alias = (
-                    self._normalize_field_name(
-                        alias
-                    )
+                    self._normalize_field_name(alias)
                 )
 
                 existing = alias_index.get(
@@ -588,20 +600,20 @@ class FieldMapper:
         Examples:
 
             "Property Type"
-                → "property_type"
+                -> "property_type"
 
             "property-type"
-                → "property_type"
+                -> "property_type"
 
             " BEDROOMS "
-                → "bedrooms"
+                -> "bedrooms"
         """
 
         value = str(field_name).strip().lower()
 
         # Handle common separators.
         value = re.sub(
-            r"[\s\-\/]+",
+            r"[\s\-/]+",
             "_",
             value,
         )
@@ -621,4 +633,3 @@ class FieldMapper:
         )
 
         return value.strip("_")
-
