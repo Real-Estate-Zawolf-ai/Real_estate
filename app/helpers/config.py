@@ -23,7 +23,6 @@ class Settings(BaseSettings):
 
     APP_NAME: str = "Real Estate Assistant API"
     APP_VERSION: str = "0.1.0"
-
     PRIMARY_LANG: str = "en"
     DEFAULT_LANG: str = "en"
 
@@ -32,7 +31,6 @@ class Settings(BaseSettings):
     # -----------------------------------------------------------------------
 
     GENERATION_BACKEND: str = "groq"
-
     GENERATION_MODEL: str = "openai/gpt-oss-120b"
 
     GROQ_API_KEY: str | None = None
@@ -50,9 +48,7 @@ class Settings(BaseSettings):
     # -----------------------------------------------------------------------
 
     EMBEDDING_BACKEND: str = "sentence-transformers"
-
     EMBEDDING_MODEL: str = "intfloat/multilingual-e5-small"
-
     EMBEDDING_MODEL_ID: str | None = None
 
     # -----------------------------------------------------------------------
@@ -60,7 +56,6 @@ class Settings(BaseSettings):
     # -----------------------------------------------------------------------
 
     RERANKER_MODEL: str = "BAAI/bge-reranker-v2-m3"
-
     RERANKER_DEVICE: str | None = None
 
     # -----------------------------------------------------------------------
@@ -68,11 +63,8 @@ class Settings(BaseSettings):
     # -----------------------------------------------------------------------
 
     QDRANT_CLUSTER_ENDPOINT: str | None = None
-
     QDRANT_URL: str | None = None
-
     QDRANT_API_KEY: str | None = None
-
     QDRANT_COLLECTION: str = "properties"
 
     # -----------------------------------------------------------------------
@@ -86,11 +78,8 @@ class Settings(BaseSettings):
     # -----------------------------------------------------------------------
 
     WHATSAPP_VERIFY_TOKEN: str | None = None
-
     WHATSAPP_APP_SECRET: str | None = None
-
     WHATSAPP_ACCESS_TOKEN: str | None = None
-
     WHATSAPP_PHONE_NUMBER_ID: str | None = None
 
     # -----------------------------------------------------------------------
@@ -108,9 +97,7 @@ class Settings(BaseSettings):
     # -----------------------------------------------------------------------
 
     VECTOR_DB_BACKEND: str = "qdrant"
-
     VECTOR_DB_PATH: str | None = None
-
     VECTOR_DB_DISTANCE_METHOD: str = "cosine"
 
     # -----------------------------------------------------------------------
@@ -118,11 +105,8 @@ class Settings(BaseSettings):
     # -----------------------------------------------------------------------
 
     FILE_ALLOWED_TYPES: list[str] = Field(default_factory=list)
-
     FILE_MAX_SIZE: int | None = None
-
     FILE_DEFAULT_CHUNK_SIZE: int = 1500
-
     FILE_CHUNK_OVERLAP: int = 100
 
 

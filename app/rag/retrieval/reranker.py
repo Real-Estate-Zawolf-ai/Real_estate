@@ -1,10 +1,4 @@
-"""
-reranker.py
-
-Reranks the candidate set from hybrid_search.py using a cross-encoder.
-
-The cross-encoder scores (query, chunk) pairs jointly and is generally
-more accurate than the bi-encoder similarity used for initial retrieval.
+"""Cross-encoder reranking for the Real Estate RAG system.
 
 Retrieval flow:
 
@@ -18,19 +12,18 @@ Retrieval flow:
             ↓
     Final Top-K Results
 
-Open-source model:
-
-    BAAI/bge-reranker-v2-m3
-
-This model supports multilingual retrieval, including Arabic and English.
+The default model is BAAI/bge-reranker-v2-m3, configured through the
+application settings. The model supports multilingual retrieval,
+including Arabic and English.
 """
 
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import replace
-from typing import Any, List
+from typing import Any
+
+from app.helpers.config import get_settings
 
 from .hybrid_search import SearchResult
 
@@ -42,45 +35,27 @@ logger = logging.getLogger(__name__)
 # Configuration
 # ---------------------------------------------------------------------------
 
-MODEL_NAME = "BAAI/bge-reranker-v2-m3"
+settings = get_settings()
 
-# Optional environment override.
-# Examples:
-#
-#   RERANKER_MODEL=BAAI/bge-reranker-v2-m3
-#
-# This keeps the default model explicit while allowing configuration
-# without changing application code.
-CONFIGURED_MODEL_NAME = os.getenv(
-    "RERANKER_MODEL",
-    MODEL_NAME,
+DEFAULT_MODEL_NAME = "BAAI/bge-reranker-v2-m3"
+
+CONFIGURED_MODEL_NAME = (
+    settings.RERANKER_MODEL or DEFAULT_MODEL_NAME
 )
 
-# Optional device override.
-#
-# Examples:
-#
-#   RERANKER_DEVICE=cpu
-#   RERANKER_DEVICE=mps
-#
-# If not provided, sentence-transformers will choose automatically.
-RERANKER_DEVICE = os.getenv("RERANKER_DEVICE")
+RERANKER_DEVICE = settings.RERANKER_DEVICE
 
 
 # ---------------------------------------------------------------------------
 # Lazy-loaded singleton
 # ---------------------------------------------------------------------------
-#
-# Loading a cross-encoder is expensive, so initialize it only when needed
-# and reuse the same model for subsequent requests.
 
 _reranker_model: Any = None
 
 
-def _get_reranker():
-    """
-    Load and cache the cross-encoder model.
-    """
+def _get_reranker() -> Any:
+    """Load and cache the cross-encoder model."""
+
     global _reranker_model
 
     if _reranker_model is None:
@@ -92,15 +67,15 @@ def _get_reranker():
             RERANKER_DEVICE or "auto",
         )
 
+        kwargs: dict[str, Any] = {}
+
         if RERANKER_DEVICE:
-            _reranker_model = CrossEncoder(
-                CONFIGURED_MODEL_NAME,
-                device=RERANKER_DEVICE,
-            )
-        else:
-            _reranker_model = CrossEncoder(
-                CONFIGURED_MODEL_NAME,
-            )
+            kwargs["device"] = RERANKER_DEVICE
+
+        _reranker_model = CrossEncoder(
+            CONFIGURED_MODEL_NAME,
+            **kwargs,
+        )
 
         logger.info(
             "Reranker model loaded successfully | model=%s",
@@ -117,14 +92,10 @@ def _get_reranker():
 
 def _predict_scores(
     query: str,
-    candidates: List[SearchResult],
-) -> List[float]:
-    """
-    Generate cross-encoder relevance scores for candidate chunks.
+    candidates: list[SearchResult],
+) -> list[float]:
+    """Generate cross-encoder relevance scores for candidate chunks."""
 
-    Keeping inference in one helper ensures rerank() and
-    rerank_with_trace() use exactly the same prediction logic.
-    """
     if not candidates:
         return []
 
@@ -137,9 +108,6 @@ def _predict_scores(
 
     raw_scores = model.predict(pairs)
 
-    # sentence-transformers normally returns a NumPy array/list.
-    # Converting explicitly gives the rest of the application a stable
-    # Python representation.
     try:
         return [float(score) for score in raw_scores]
     except TypeError:
@@ -147,61 +115,22 @@ def _predict_scores(
 
 
 # ---------------------------------------------------------------------------
-# Reranking
+# Apply reranker scores
 # ---------------------------------------------------------------------------
 
 
-def rerank(
-    query: str,
-    candidates: List[SearchResult],
-    top_k: int = 5,
-) -> List[SearchResult]:
-    """
-    Rerank retrieved candidates using the cross-encoder.
-
-    Args:
-        query:
-            User's search query.
-
-        candidates:
-            Candidate SearchResult objects produced by hybrid_search().
-
-        top_k:
-            Maximum number of results to return.
-
-    Returns:
-        SearchResult objects sorted by reranker score, best first.
-
-    Notes:
-        The original hybrid score is preserved in the result metadata as
-        ``pre_rerank_score``.
-
-        ``combined_score`` is overwritten with the final cross-encoder
-        reranking score so downstream generation code can treat it as the
-        final relevance score.
-    """
-    if not isinstance(query, str) or not query.strip():
-        return []
-
-    if not candidates:
-        return []
-
-    if top_k <= 0:
-        return []
-
-    query = query.strip()
-
-    scores = _predict_scores(
-        query=query,
-        candidates=candidates,
-    )
+def _apply_reranker_scores(
+    candidates: list[SearchResult],
+    scores: list[float],
+) -> list[SearchResult]:
+    """Return candidates with reranker scores applied."""
 
     if len(scores) != len(candidates):
         raise RuntimeError(
             "Reranker output count does not match candidate count"
         )
 
-    reranked: List[SearchResult] = []
+    reranked: list[SearchResult] = []
 
     for candidate, score in zip(candidates, scores):
         pre_rerank_score = candidate.combined_score
@@ -224,6 +153,62 @@ def rerank(
         reverse=True,
     )
 
+    return reranked
+
+
+# ---------------------------------------------------------------------------
+# Reranking
+# ---------------------------------------------------------------------------
+
+
+def rerank(
+    query: str,
+    candidates: list[SearchResult],
+    top_k: int = 5,
+) -> list[SearchResult]:
+    """Rerank retrieved candidates using the cross-encoder.
+
+    Args:
+        query:
+            User's search query.
+
+        candidates:
+            Candidate SearchResult objects produced by hybrid_search().
+
+        top_k:
+            Maximum number of results to return.
+
+    Returns:
+        SearchResult objects sorted by reranker score, best first.
+
+    Notes:
+        The original hybrid score is preserved as
+        ``metadata["pre_rerank_score"]``.
+
+        ``combined_score`` is replaced with the final reranker score.
+    """
+
+    if not isinstance(query, str) or not query.strip():
+        return []
+
+    if not candidates:
+        return []
+
+    if top_k <= 0:
+        return []
+
+    query = query.strip()
+
+    scores = _predict_scores(
+        query=query,
+        candidates=candidates,
+    )
+
+    reranked = _apply_reranker_scores(
+        candidates=candidates,
+        scores=scores,
+    )
+
     return reranked[:top_k]
 
 
@@ -234,20 +219,20 @@ def rerank(
 
 def rerank_with_trace(
     query: str,
-    candidates: List[SearchResult],
+    candidates: list[SearchResult],
     top_k: int = 5,
-) -> List[dict]:
-    """
-    Rerank candidates and return observability-friendly dictionaries.
+) -> list[dict[str, Any]]:
+    """Rerank candidates and return observability-friendly dictionaries.
 
-    Each returned dictionary contains both:
+    Each returned dictionary contains:
 
+        - property_id
+        - chunk_id
         - pre_rerank_score
         - rerank_score
-
-    This is useful for logging retrieval/reranking behavior and debugging
-    relevance issues.
+        - source_file
     """
+
     if not isinstance(query, str) or not query.strip():
         return []
 
@@ -286,4 +271,3 @@ def rerank_with_trace(
     )
 
     return trace[:top_k]
-

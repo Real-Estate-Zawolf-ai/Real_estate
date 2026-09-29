@@ -1,34 +1,32 @@
-"""
-Hybrid retrieval for the Real Estate RAG system.
+"""Hybrid retrieval for the Real Estate RAG system.
 
 Pipeline:
 
     Metadata Filtering
-        ↓
+            ↓
     Dense Vector Search (Qdrant)
-        +
+            +
     Optional Lexical Search (BM25)
-        ↓
+            ↓
     Score Normalization
-        ↓
+            ↓
     Weighted Hybrid Ranking
-        ↓
-    Optional Cross-Encoder Reranking
 
 Important:
 
     - Query embeddings are generated through the shared EmbeddingModel.
     - The same embedding configuration must be used during indexing.
     - Metadata filters are applied to both semantic and lexical retrieval.
-    - BM25 is optional and requires an in-memory corpus.
-    - When no corpus is supplied, retrieval safely falls back to dense
-      semantic search only.
+    - BM25 is optional and requires an explicitly supplied in-memory corpus.
+    - When no corpus is supplied, retrieval safely falls back to dense search.
+    - This module does not automatically load the full Qdrant collection
+      into memory.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from rank_bm25 import BM25Okapi
 
@@ -40,16 +38,12 @@ from .metadata_filter import MetadataFilter, matches
 # Embedding model
 # ---------------------------------------------------------------------------
 
-_embedding_model: Optional[EmbeddingModel] = None
+_embedding_model: EmbeddingModel | None = None
 
 
 def _get_embedding_model() -> EmbeddingModel:
-    """
-    Lazily initialize and reuse the shared embedding model.
+    """Lazily initialize and reuse the shared embedding model."""
 
-    The actual model configuration lives in app.rag.embeddings so that
-    indexing and retrieval cannot accidentally use different models.
-    """
     global _embedding_model
 
     if _embedding_model is None:
@@ -58,13 +52,9 @@ def _get_embedding_model() -> EmbeddingModel:
     return _embedding_model
 
 
-def embed_query(query: str) -> List[float]:
-    """
-    Embed a search query using the shared EmbeddingModel.
+def embed_query(query: str) -> list[float]:
+    """Embed a search query using the shared EmbeddingModel."""
 
-    EmbeddingModel is responsible for applying the correct query prefix
-    and normalization.
-    """
     if not isinstance(query, str) or not query.strip():
         raise ValueError("query must be a non-empty string")
 
@@ -80,16 +70,14 @@ def embed_query(query: str) -> List[float]:
 class SearchResult:
     """Normalized result returned by the retrieval layer."""
 
-    property_id: Optional[str]
-    chunk_id: Optional[str]
+    property_id: str | None
+    chunk_id: str | None
     text: str
-    metadata: Dict[str, Any]
-
+    metadata: dict[str, Any]
     semantic_score: float = 0.0
     lexical_score: float = 0.0
     combined_score: float = 0.0
-
-    source_file: Optional[str] = None
+    source_file: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -98,10 +86,9 @@ class SearchResult:
 
 
 def _flatten_metadata(
-    payload_or_chunk: Dict[str, Any],
-) -> Dict[str, Any]:
-    """
-    Return a normalized metadata dictionary.
+    payload_or_chunk: dict[str, Any],
+) -> dict[str, Any]:
+    """Return a normalized metadata dictionary.
 
     Supports both:
 
@@ -119,7 +106,10 @@ def _flatten_metadata(
             "text": "...",
             ...
         }
+
+    Top-level values take precedence over nested metadata values.
     """
+
     metadata = payload_or_chunk.get("metadata", {})
 
     if not isinstance(metadata, dict):
@@ -135,13 +125,17 @@ def _flatten_metadata(
     }
 
 
-def _result_key(result: SearchResult, fallback_prefix: str, index: int) -> str:
-    """
-    Build a stable merge key for semantic and lexical results.
+def _result_key(
+    result: SearchResult,
+    fallback_prefix: str,
+    index: int,
+) -> str:
+    """Build a stable merge key for semantic and lexical results.
 
     Chunk ID is preferred because multiple chunks can belong to the same
-    property. Property ID is used as a fallback.
+    property. Property ID is used only as a fallback.
     """
+
     if result.chunk_id:
         return str(result.chunk_id)
 
@@ -157,18 +151,14 @@ def _result_key(result: SearchResult, fallback_prefix: str, index: int) -> str:
 
 
 def _to_qdrant_filter(
-    requirements_filter: Optional[MetadataFilter],
-) -> Optional[Dict[str, Any]]:
-    """
-    Convert MetadataFilter into a Qdrant filter dictionary.
+    requirements_filter: MetadataFilter | None,
+) -> dict[str, Any] | None:
+    """Convert MetadataFilter into a Qdrant filter dictionary."""
 
-    This keeps retrieval independent from the application's requirement
-    parsing logic.
-    """
     if requirements_filter is None or requirements_filter.is_empty():
         return None
 
-    must_conditions: List[Dict[str, Any]] = []
+    must_conditions: list[dict[str, Any]] = []
 
     # ------------------------------------------------------------------
     # Equality constraints
@@ -189,7 +179,7 @@ def _to_qdrant_filter(
     # ------------------------------------------------------------------
 
     for constraint in requirements_filter.ranges:
-        range_condition: Dict[str, Any] = {}
+        range_condition: dict[str, Any] = {}
 
         if constraint.gte is not None:
             range_condition["gte"] = constraint.gte
@@ -220,14 +210,13 @@ def _to_qdrant_filter(
 
 def _qdrant_search(
     query: str,
-    filt: Optional[MetadataFilter],
+    filt: MetadataFilter | None,
     collection_name: str,
     qdrant_client: Any,
     top_k: int,
-) -> List[SearchResult]:
-    """
-    Perform dense vector search against Qdrant.
-    """
+) -> list[SearchResult]:
+    """Perform dense vector search against Qdrant."""
+
     if top_k <= 0:
         return []
 
@@ -236,7 +225,7 @@ def _qdrant_search(
 
     qdrant_filter = _to_qdrant_filter(filt)
 
-    search_kwargs: Dict[str, Any] = {
+    search_kwargs: dict[str, Any] = {
         "collection_name": collection_name,
         "limit": top_k,
         "query_vector": embed_query(query),
@@ -247,7 +236,7 @@ def _qdrant_search(
 
     points = qdrant_client.search(**search_kwargs)
 
-    results: List[SearchResult] = []
+    results: list[SearchResult] = []
 
     for point in points:
         payload = getattr(point, "payload", None) or {}
@@ -264,23 +253,41 @@ def _qdrant_search(
         if not isinstance(text, str):
             text = str(text)
 
+        property_id = payload.get(
+            "property_id",
+            flattened_metadata.get("property_id"),
+        )
+
+        chunk_id = payload.get(
+            "chunk_id",
+            flattened_metadata.get("chunk_id"),
+        )
+
+        source_file = payload.get(
+            "source_file",
+            flattened_metadata.get("source_file"),
+        )
+
         results.append(
             SearchResult(
-                property_id=payload.get(
-                    "property_id",
-                    flattened_metadata.get("property_id"),
+                property_id=(
+                    str(property_id)
+                    if property_id is not None
+                    else None
                 ),
-                chunk_id=payload.get(
-                    "chunk_id",
-                    flattened_metadata.get("chunk_id"),
+                chunk_id=(
+                    str(chunk_id)
+                    if chunk_id is not None
+                    else None
                 ),
                 text=text,
                 metadata=flattened_metadata,
                 semantic_score=score,
                 combined_score=score,
-                source_file=payload.get(
-                    "source_file",
-                    flattened_metadata.get("source_file"),
+                source_file=(
+                    str(source_file)
+                    if source_file is not None
+                    else None
                 ),
             )
         )
@@ -294,15 +301,11 @@ def _qdrant_search(
 
 
 def _matches_requirements(
-    chunk: Dict[str, Any],
-    requirements_filter: Optional[MetadataFilter],
+    chunk: dict[str, Any],
+    requirements_filter: MetadataFilter | None,
 ) -> bool:
-    """
-    Apply the same hard metadata constraints used by semantic retrieval.
+    """Apply hard metadata constraints to a lexical-search chunk."""
 
-    BM25 operates over a local corpus, so hard constraints must be applied
-    before lexical ranking.
-    """
     if requirements_filter is None or requirements_filter.is_empty():
         return True
 
@@ -318,19 +321,18 @@ def _matches_requirements(
 
 def _bm25_search(
     query: str,
-    corpus_chunks: List[Dict[str, Any]],
+    corpus_chunks: list[dict[str, Any]],
     top_k: int,
-    requirements_filter: Optional[MetadataFilter] = None,
-) -> List[SearchResult]:
-    """
-    Perform lexical BM25 retrieval over the supplied in-memory corpus.
+    requirements_filter: MetadataFilter | None = None,
+) -> list[SearchResult]:
+    """Perform BM25 retrieval over an explicitly supplied corpus.
 
-    The corpus is filtered by metadata before BM25 scoring.
+    Hard metadata constraints are applied before BM25 scoring.
 
-    Note:
-        This function intentionally operates on an explicitly supplied
-        corpus. It does not load the entire Qdrant collection into memory.
+    The function intentionally does not load data from Qdrant. The caller
+    is responsible for supplying the lexical corpus.
     """
+
     if top_k <= 0 or not corpus_chunks:
         return []
 
@@ -344,7 +346,7 @@ def _bm25_search(
     if not filtered_chunks:
         return []
 
-    documents: List[str] = []
+    documents: list[str] = []
 
     for chunk in filtered_chunks:
         text = chunk.get("text", "")
@@ -353,6 +355,9 @@ def _bm25_search(
             text = str(text)
 
         documents.append(text)
+
+    if not documents:
+        return []
 
     tokenized_corpus = [
         document.lower().split()
@@ -373,21 +378,20 @@ def _bm25_search(
 
     ranked_indices = sorted(
         range(len(scores)),
-        key=lambda index: scores[index],
+        key=lambda index: float(scores[index]),
         reverse=True,
     )
 
-    results: List[SearchResult] = []
+    results: list[SearchResult] = []
 
     for index in ranked_indices[:top_k]:
         score = float(scores[index])
 
-        # Ignore lexical non-matches.
+        # BM25 score <= 0 means there is no useful lexical match.
         if score <= 0:
             continue
 
         chunk = filtered_chunks[index]
-
         flattened_metadata = _flatten_metadata(chunk)
 
         text = chunk.get("text", "")
@@ -395,23 +399,41 @@ def _bm25_search(
         if not isinstance(text, str):
             text = str(text)
 
+        property_id = chunk.get(
+            "property_id",
+            flattened_metadata.get("property_id"),
+        )
+
+        chunk_id = chunk.get(
+            "chunk_id",
+            flattened_metadata.get("chunk_id"),
+        )
+
+        source_file = chunk.get(
+            "source_file",
+            flattened_metadata.get("source_file"),
+        )
+
         results.append(
             SearchResult(
-                property_id=chunk.get(
-                    "property_id",
-                    flattened_metadata.get("property_id"),
+                property_id=(
+                    str(property_id)
+                    if property_id is not None
+                    else None
                 ),
-                chunk_id=chunk.get(
-                    "chunk_id",
-                    flattened_metadata.get("chunk_id"),
+                chunk_id=(
+                    str(chunk_id)
+                    if chunk_id is not None
+                    else None
                 ),
                 text=text,
                 metadata=flattened_metadata,
                 lexical_score=score,
                 combined_score=score,
-                source_file=chunk.get(
-                    "source_file",
-                    flattened_metadata.get("source_file"),
+                source_file=(
+                    str(source_file)
+                    if source_file is not None
+                    else None
                 ),
             )
         )
@@ -424,12 +446,12 @@ def _bm25_search(
 # ---------------------------------------------------------------------------
 
 
-def _min_max_normalize(scores: List[float]) -> List[float]:
-    """
-    Normalize scores to the [0, 1] range.
+def _min_max_normalize(scores: list[float]) -> list[float]:
+    """Normalize scores into the [0, 1] range.
 
-    If all scores are identical, return 1.0 for each score.
+    If all scores are identical, every score is treated as 1.0.
     """
+
     if not scores:
         return []
 
@@ -437,10 +459,12 @@ def _min_max_normalize(scores: List[float]) -> List[float]:
     max_score = max(scores)
 
     if max_score == min_score:
-        return [1.0 for _ in scores]
+        return [1.0] * len(scores)
+
+    denominator = max_score - min_score
 
     return [
-        (score - min_score) / (max_score - min_score)
+        (score - min_score) / denominator
         for score in scores
     ]
 
@@ -452,18 +476,17 @@ def _min_max_normalize(scores: List[float]) -> List[float]:
 
 def hybrid_search(
     query: str,
-    requirements_filter: Optional[MetadataFilter] = None,
+    requirements_filter: MetadataFilter | None = None,
     collection_name: str = "properties",
     qdrant_client: Any = None,
     top_k: int = 10,
     semantic_weight: float = 0.7,
     lexical_weight: float = 0.3,
-    corpus_chunks: Optional[List[Dict[str, Any]]] = None,
+    corpus_chunks: list[dict[str, Any]] | None = None,
     *,
     client: Any = None,
-) -> List[SearchResult]:
-    """
-    Perform semantic retrieval with optional BM25 lexical retrieval.
+) -> list[SearchResult]:
+    """Perform dense retrieval with optional BM25 lexical retrieval.
 
     Args:
         query:
@@ -479,10 +502,10 @@ def hybrid_search(
             Qdrant client instance.
 
         client:
-            Backwards-compatible alias for qdrant_client.
+            Backwards-compatible alias for ``qdrant_client``.
 
         top_k:
-            Number of final retrieval results.
+            Maximum number of final results.
 
         semantic_weight:
             Weight assigned to dense semantic retrieval.
@@ -491,12 +514,11 @@ def hybrid_search(
             Weight assigned to BM25 lexical retrieval.
 
         corpus_chunks:
-            Optional local corpus used for BM25 retrieval.
-
-            If omitted, retrieval uses semantic Qdrant search only.
+            Optional in-memory corpus used for BM25 retrieval.
+            If omitted, retrieval is semantic-only.
 
     Returns:
-        List[SearchResult] sorted by combined_score.
+        Search results sorted by ``combined_score`` descending.
     """
 
     # ------------------------------------------------------------------
@@ -607,7 +629,7 @@ def hybrid_search(
     # Merge results
     # ------------------------------------------------------------------
 
-    merged: Dict[str, SearchResult] = {}
+    merged: dict[str, SearchResult] = {}
 
     # Add semantic results.
     for index, (result, normalized_score) in enumerate(
@@ -628,7 +650,7 @@ def hybrid_search(
 
         merged[key] = result
 
-    # Add / merge lexical results.
+    # Add or merge lexical results.
     for index, (result, normalized_score) in enumerate(
         zip(
             lexical_results,
@@ -668,4 +690,3 @@ def hybrid_search(
     )
 
     return results[:top_k]
-
