@@ -1,5 +1,5 @@
 """
-tests/unit/test_generation.py
+tests/unit/rag/test_generation.py
 
 Unit tests for app/rag/generation.py.
 
@@ -136,15 +136,17 @@ class TestGenerateResponse:
         with patch.object(generation, "_get_client", return_value=fake_client):
             result = generation.generate_response("عايز شقة 3 غرف في التجمع", candidates)
 
+        expected_model = generation._get_model_name()
+
         assert isinstance(result, generation.GenerationResult)
         assert "A102" in result.answer_text
         assert result.cited_property_ids == ["A102", "B205"]
         assert result.grounding_property_ids == ["A102", "B205"]
-        assert result.model == generation.MODEL_NAME
+        assert result.model == expected_model
 
-        # Confirm the Groq call was made with the right model + our messages.
+        # Confirm the Groq call was made with the configured model + our messages.
         _, kwargs = fake_client.chat.completions.create.call_args
-        assert kwargs["model"] == "openai/gpt-oss-120b"
+        assert kwargs["model"] == expected_model
         assert kwargs["messages"][-1]["content"] == "عايز شقة 3 غرف في التجمع"
 
     def test_generate_response_no_candidates(self):
@@ -171,9 +173,20 @@ class TestGenerateResponse:
             with caplog.at_level(logging.WARNING):
                 result = generation.generate_response("test query", candidates)
 
-        assert result.cited_property_ids == ["Z999"]
+        # Unsupported IDs are filtered out of the verified citations...
+        assert result.cited_property_ids == []
         assert result.grounding_property_ids == ["A102", "B205"]
-        assert any("hallucination" in record.message for record in caplog.records)
+
+        # ...and the hallucination is logged as a warning.
+        warnings = [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelno == logging.WARNING
+        ]
+        assert any(
+            "absent from retrieved evidence" in message and "Z999" in message
+            for message in warnings
+        )
 
     def test_generate_response_passes_temperature_and_max_tokens(self, candidates):
         fake_completion = make_fake_completion('رد.\n{"cited_property_ids": []}')

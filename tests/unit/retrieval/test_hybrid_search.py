@@ -23,10 +23,13 @@ def test_bm25_search_basic():
         {"chunk_id": "3", "text": "modern villa with pool"},
     ]
     # Search for "Cairo" - should match chunk 1
-    scores = _bm25_search("Cairo", corpus, top_k=1)
-    assert "1" in scores
-    assert "2" not in scores
-    assert "3" not in scores
+    results = _bm25_search("Cairo", corpus, top_k=1)
+    chunk_ids = [r.chunk_id for r in results]
+
+    assert chunk_ids == ["1"]
+    assert "2" not in chunk_ids
+    assert "3" not in chunk_ids
+    assert results[0].lexical_score > 0
 
 def test_hybrid_search_semantic_only():
     # Mock qdrant_client and the internal search function
@@ -44,7 +47,9 @@ def test_hybrid_search_semantic_only():
 
         assert len(results) == 2
         assert results[0].chunk_id == "c1"
-        assert results[0].combined_score == 0.9
+        # Raw semantic score is preserved; combined_score is min-max normalized.
+        assert results[0].semantic_score == 0.9
+        assert results[0].combined_score == pytest.approx(1.0)
 
 def test_hybrid_search_combined():
     mock_client = MagicMock()
