@@ -44,3 +44,11 @@ logs/
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# macOS
+.DS_Store
