@@ -249,9 +249,10 @@ async def rag_search(request: RAGRequest) -> dict[str, Any]:
 
     try:
         result = generate_response(
-            customer_query=query,
-            candidates=reranked_candidates,
-        )
+                customer_query=query,
+                candidates=reranked_candidates,
+                requirements=request.requirements,
+                )
 
         logger.info(
             "Response generation completed | cited=%d | grounded=%d",
