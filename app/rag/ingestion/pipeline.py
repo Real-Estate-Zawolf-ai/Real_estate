@@ -1,28 +1,33 @@
 """
 RAG Ingestion Pipeline.
 
-Current responsibility:
+Responsibilities:
 
     file
         -> file type detection
         -> loader
-        -> extracted content
+        -> extraction
+        -> normalization
         -> metadata
         -> chunking
         -> chunk records
 
-Images are only loaded here.
+Architecture notes:
 
-OCR, CV, normalization, embeddings, and vector storage
-are handled by separate components and will be integrated later.
-
-The pipeline keeps each ingestion component loosely coupled
-so they can be replaced independently.
+    - Text-based files are loaded and normalized before chunking.
+    - Structured spreadsheets are processed row-by-row.
+    - For property datasets, JSON stored in the `metadata` column is
+      parsed before field mapping.
+    - Each property keeps its own canonical metadata and identity.
+    - Images are loaded here but OCR/CV remain separate components.
+    - Embeddings and vector storage are intentionally NOT handled here.
+    - The output of this pipeline is ready for the indexing layer.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 from pathlib import Path
 from typing import Any, Callable
@@ -39,6 +44,9 @@ from app.rag.ingestion.metadata import (
     add_chunk_metadata,
     build_metadata,
 )
+from app.rag.normalization.field_mapper import FieldMapper
+from app.rag.normalization.property_normalizer import PropertyNormalizer
+
 
 logger = logging.getLogger(__name__)
 
@@ -55,22 +63,15 @@ Loader = Callable[[str], Any]
 # ============================================================
 
 LOADER_REGISTRY: dict[str, Loader] = {
-    # Documents
     ".pdf": parse_pdf,
     ".docx": parse_office,
     ".pptx": parse_office,
-
-    # Text
     ".txt": parse_text,
     ".md": parse_text,
     ".markdown": parse_text,
-
-    # Spreadsheets
     ".csv": parse_spreadsheet,
     ".xlsx": parse_spreadsheet,
     ".xls": parse_spreadsheet,
-
-    # Images
     ".jpg": load_image,
     ".jpeg": load_image,
     ".png": load_image,
@@ -82,22 +83,15 @@ LOADER_REGISTRY: dict[str, Loader] = {
 
 
 FILE_TYPE_MAP: dict[str, str] = {
-    # Documents
     ".pdf": "pdf",
     ".docx": "office",
     ".pptx": "office",
-
-    # Text
     ".txt": "text",
     ".md": "text",
     ".markdown": "text",
-
-    # Spreadsheets
     ".csv": "spreadsheet",
     ".xlsx": "spreadsheet",
     ".xls": "spreadsheet",
-
-    # Images
     ".jpg": "image",
     ".jpeg": "image",
     ".png": "image",
@@ -106,6 +100,36 @@ FILE_TYPE_MAP: dict[str, str] = {
     ".tiff": "image",
     ".tif": "image",
 }
+
+
+# ============================================================
+# Normalization components
+# ============================================================
+
+_property_normalizer: PropertyNormalizer | None = None
+_field_mapper: FieldMapper | None = None
+
+
+def _get_property_normalizer() -> PropertyNormalizer:
+    """Lazily initialize the property normalizer."""
+    global _property_normalizer
+
+    if _property_normalizer is None:
+        _property_normalizer = PropertyNormalizer()
+
+    return _property_normalizer
+
+
+def _get_field_mapper() -> FieldMapper:
+    """Lazily initialize the structured field mapper."""
+    global _field_mapper
+
+    if _field_mapper is None:
+        _field_mapper = FieldMapper(
+            preserve_unknown=True
+        )
+
+    return _field_mapper
 
 
 # ============================================================
@@ -124,33 +148,370 @@ def detect_file_type(file_path: str) -> str:
 
 
 def is_supported(file_path: str) -> bool:
-    """
-    Check whether the file extension is supported.
-    """
+    """Check whether the file extension is supported."""
     extension = Path(file_path).suffix.lower()
     return extension in LOADER_REGISTRY
 
+
+# ============================================================
+# ID helpers
+# ============================================================
 
 def _build_chunk_id(
     file_path: Path,
     chunk_index: int,
     property_id: str | None = None,
+    record_index: int | None = None,
 ) -> str:
     """
     Build a deterministic identifier for a chunk.
 
-    The same file + property + chunk index will generate
-    the same identifier.
+    Identity includes:
+
+        property_id
+        file path
+        record index
+        chunk index
     """
     identity = (
         f"{property_id or 'no-property'}"
         f"::{file_path.resolve()}"
-        f"::{chunk_index}"
+        f"::record-{record_index if record_index is not None else 'document'}"
+        f"::chunk-{chunk_index}"
     )
 
     return hashlib.sha256(
         identity.encode("utf-8")
     ).hexdigest()
+
+
+def _extract_property_id(
+    mapped_fields: dict[str, Any],
+    row: dict[str, Any],
+    *,
+    fallback_index: int,
+) -> str:
+    """
+    Extract a property identifier from a structured row.
+
+    The canonical `property_id` is preferred. If unavailable,
+    common source column names are checked. Finally, a deterministic
+    row-based identifier is generated.
+    """
+    candidates = [
+        mapped_fields.get("property_id"),
+        row.get("property_id"),
+        row.get("Property ID"),
+        row.get("propertyId"),
+        row.get("id"),
+        row.get("ID"),
+    ]
+
+    for value in candidates:
+        if value is None:
+            continue
+
+        value_text = str(value).strip()
+
+        if value_text:
+            return value_text
+
+    return f"row-{fallback_index}"
+
+
+# ============================================================
+# Metadata / normalization helpers
+# ============================================================
+
+def _merge_metadata(
+    base_metadata: dict[str, Any],
+    normalized_fields: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """
+    Merge canonical normalized property fields into document metadata.
+    """
+    metadata = dict(base_metadata)
+
+    if normalized_fields:
+        for key, value in normalized_fields.items():
+            if value is not None:
+                metadata[key] = value
+
+    return metadata
+
+
+def _normalize_text(text: str) -> dict[str, Any]:
+    """
+    Extract canonical property fields from unstructured text.
+    """
+    normalizer = _get_property_normalizer()
+    normalized = normalizer.normalize_to_dict(text)
+
+    if not isinstance(normalized, dict):
+        logger.warning(
+            "PropertyNormalizer returned unexpected type | type=%s",
+            type(normalized).__name__,
+        )
+        return {}
+
+    return normalized
+
+
+# ============================================================
+# Structured metadata parsing
+# ============================================================
+
+def _parse_structured_metadata(
+    value: Any,
+) -> dict[str, Any]:
+    """
+    Parse a structured `metadata` value.
+
+    Property CSV files in this project store their real property
+    fields as a JSON object inside the `metadata` column.
+
+    Examples:
+
+        '{"property_id": 123, "type": "Villa", "price_egp": 7800000}'
+
+    or:
+
+        {"property_id": 123, "type": "Villa"}
+
+    Invalid or non-object values return an empty dictionary.
+    """
+    if value is None:
+        return {}
+
+    if isinstance(value, dict):
+        return dict(value)
+
+    if not isinstance(value, str):
+        return {}
+
+    raw = value.strip()
+
+    if not raw:
+        return {}
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning(
+            "Structured metadata JSON parsing failed"
+        )
+        return {}
+
+    if not isinstance(parsed, dict):
+        logger.warning(
+            "Structured metadata JSON is not an object | type=%s",
+            type(parsed).__name__,
+        )
+        return {}
+
+    return parsed
+
+
+def _prepare_structured_row(
+    row: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Flatten a property row before field mapping.
+
+    Example input:
+
+        {
+            "id": 501189976,
+            "text": "Villa for sale ...",
+            "metadata": "{\"property_id\": 501189976, ...}"
+        }
+
+    Result:
+
+        {
+            "id": 501189976,
+            "text": "Villa for sale ...",
+            "property_id": 501189976,
+            "type": "Villa",
+            "price_egp": 7800000,
+            ...
+        }
+
+    The original `text` and `metadata` fields are preserved.
+    """
+    prepared = dict(row)
+
+    raw_metadata = row.get("metadata")
+    parsed_metadata = _parse_structured_metadata(raw_metadata)
+
+    if parsed_metadata:
+        prepared.update(parsed_metadata)
+
+    return prepared
+
+
+def _normalize_structured_row(
+    row: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Map one structured spreadsheet row to canonical property fields.
+
+    The row is first flattened so JSON metadata fields become visible
+    to the FieldMapper.
+    """
+    prepared_row = _prepare_structured_row(row)
+
+    mapper = _get_field_mapper()
+    result = mapper.map_fields(prepared_row)
+
+    if not isinstance(result.mapped, dict):
+        logger.warning(
+            "FieldMapper returned unexpected mapped type | type=%s",
+            type(result.mapped).__name__,
+        )
+        return {}
+
+    normalized = {
+        key: value
+        for key, value in result.mapped.items()
+        if value is not None and value != ""
+    }
+
+    logger.info(
+        "Structured row normalized | mapped=%d | unmapped=%d",
+        len(normalized),
+        len(result.unmapped),
+    )
+
+    return normalized
+
+
+def _get_structured_row_text(
+    row: dict[str, Any],
+) -> str:
+    """
+    Extract the original searchable text from a structured row.
+
+    If a `text` column exists, it is preferred because it is already
+    written as a natural-language property description.
+
+    Otherwise, a textual representation of the row is generated.
+    """
+    text = row.get("text")
+
+    if isinstance(text, str) and text.strip():
+        return text.strip()
+
+    prepared_row = _prepare_structured_row(row)
+
+    lines: list[str] = []
+
+    for key, value in prepared_row.items():
+        if key == "metadata":
+            continue
+
+        if value is None:
+            continue
+
+        value_text = str(value).strip()
+
+        if not value_text:
+            continue
+
+        lines.append(f"{key}: {value_text}")
+
+    return "\n".join(lines).strip()
+
+
+# ============================================================
+# Structured row ingestion
+# ============================================================
+
+def _build_structured_row_chunk(
+    *,
+    path: Path,
+    row: dict[str, Any],
+    row_index: int,
+    document_metadata: dict[str, Any],
+    property_id: str | None,
+    chunk_size: int,
+    chunk_overlap: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """
+    Convert one spreadsheet row into independent chunk records.
+
+    Returns:
+        (chunk_records, normalized_fields)
+    """
+    normalized_fields = _normalize_structured_row(row)
+
+    prepared_row = _prepare_structured_row(row)
+
+    row_property_id = _extract_property_id(
+        normalized_fields,
+        prepared_row,
+        fallback_index=row_index,
+    )
+
+    # Explicit function argument takes precedence.
+    if property_id:
+        row_property_id = property_id
+
+    row_metadata = dict(document_metadata)
+
+    row_metadata["property_id"] = row_property_id
+    row_metadata["record_index"] = row_index
+
+    row_metadata = _merge_metadata(
+        row_metadata,
+        normalized_fields,
+    )
+
+    text = _get_structured_row_text(row)
+
+    if not text:
+        return [], normalized_fields
+
+    chunks = chunk_text(
+        text,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+    )
+
+    if not chunks:
+        return [], normalized_fields
+
+    total_chunks = len(chunks)
+
+    chunk_records: list[dict[str, Any]] = []
+
+    for chunk_index, chunk in enumerate(chunks):
+        chunk_metadata = add_chunk_metadata(
+            row_metadata,
+            chunk_index=chunk_index,
+            total_chunks=total_chunks,
+        )
+
+        # Keep property identity explicit in every chunk.
+        chunk_metadata["property_id"] = row_property_id
+        chunk_metadata["record_index"] = row_index
+
+        chunk_id = _build_chunk_id(
+            path,
+            chunk_index,
+            row_property_id,
+            record_index=row_index,
+        )
+
+        chunk_records.append(
+            {
+                "id": chunk_id,
+                "text": chunk,
+                "metadata": chunk_metadata,
+            }
+        )
+
+    return chunk_records, normalized_fields
 
 
 # ============================================================
@@ -168,45 +529,8 @@ def ingest_file(
     """
     Ingest a single file.
 
-    Current flow:
-
-        file
-            -> detect type
-            -> loader
-            -> metadata
-            -> chunking
-            -> chunk records
-
-    Embeddings and vector storage are intentionally NOT handled
-    here yet. They will be integrated after those components
-    are implemented.
-
-    Args:
-        file_path:
-            Path to the input file.
-
-        property_id:
-            Optional real-estate property identifier.
-
-        extra_metadata:
-            Additional metadata such as developer,
-            compound, language, source, etc.
-
-        chunk_size:
-            Maximum chunk size.
-
-        chunk_overlap:
-            Number of overlapping characters.
-
-    Returns:
-        Dictionary containing:
-            - status
-            - file information
-            - metadata
-            - chunks
-            - chunk count
+    Embeddings and vector storage are intentionally NOT handled here.
     """
-
     path = Path(file_path)
 
     logger.info(
@@ -248,7 +572,6 @@ def ingest_file(
             file_path,
             extension,
         )
-
         return {
             "status": "unsupported",
             "file": str(path),
@@ -274,7 +597,6 @@ def ingest_file(
 
     try:
         raw_content = loader(str(path))
-
     except Exception:
         logger.exception(
             "File loading failed | file=%s",
@@ -283,7 +605,7 @@ def ingest_file(
         raise
 
     # --------------------------------------------------------
-    # Build metadata
+    # Build technical metadata
     # --------------------------------------------------------
 
     document_metadata = build_metadata(
@@ -298,7 +620,6 @@ def ingest_file(
     # ========================================================
 
     if source_type == "image":
-
         logger.info(
             "Image loaded successfully | file=%s",
             file_path,
@@ -316,8 +637,125 @@ def ingest_file(
             "message": (
                 "Image loaded successfully. "
                 "OCR/CV processing is required before "
-                "text chunking."
+                "text chunking and property normalization."
             ),
+        }
+
+    # ========================================================
+    # SPREADSHEET FLOW
+    # ========================================================
+
+    if source_type == "spreadsheet":
+        if not isinstance(raw_content, list):
+            logger.error(
+                "Spreadsheet loader returned unexpected content type | "
+                "file=%s | type=%s",
+                file_path,
+                type(raw_content).__name__,
+            )
+            raise TypeError(
+                "Expected spreadsheet loader to return list[dict], "
+                f"got {type(raw_content).__name__}"
+            )
+
+        rows = [
+            row
+            for row in raw_content
+            if isinstance(row, dict)
+        ]
+
+        if not rows:
+            logger.warning(
+                "No spreadsheet records extracted | file=%s",
+                file_path,
+            )
+
+            return {
+                "status": "empty",
+                "file": str(path),
+                "file_type": source_type,
+                "property_id": property_id,
+                "chunks": [],
+                "chunks_count": 0,
+                "metadata": document_metadata,
+                "records": [],
+            }
+
+        all_chunk_records: list[dict[str, Any]] = []
+        normalized_records: list[dict[str, Any]] = []
+
+        for row_index, row in enumerate(rows, start=1):
+            row_chunks, normalized_fields = (
+                _build_structured_row_chunk(
+                    path=path,
+                    row=row,
+                    row_index=row_index,
+                    document_metadata=document_metadata,
+                    property_id=property_id,
+                    chunk_size=chunk_size,
+                    chunk_overlap=chunk_overlap,
+                )
+            )
+
+            if not row_chunks:
+                logger.warning(
+                    "Spreadsheet row produced no chunks | "
+                    "file=%s | row=%d",
+                    file_path,
+                    row_index,
+                )
+                continue
+
+            row_property_id = row_chunks[0]["metadata"].get(
+                "property_id"
+            )
+
+            normalized_records.append(
+                {
+                    "record_index": row_index,
+                    "property_id": row_property_id,
+                    "fields": normalized_fields,
+                }
+            )
+
+            all_chunk_records.extend(row_chunks)
+
+        if not all_chunk_records:
+            logger.warning(
+                "Spreadsheet produced no searchable records | file=%s",
+                file_path,
+            )
+
+            return {
+                "status": "empty",
+                "file": str(path),
+                "file_type": source_type,
+                "property_id": property_id,
+                "chunks": [],
+                "chunks_count": 0,
+                "metadata": document_metadata,
+                "records": rows,
+                "normalized_records": normalized_records,
+            }
+
+        logger.info(
+            "Spreadsheet processed row-by-row | "
+            "file=%s | records=%d | chunks=%d",
+            file_path,
+            len(normalized_records),
+            len(all_chunk_records),
+        )
+
+        return {
+            "status": "success",
+            "file": str(path),
+            "file_type": source_type,
+            "property_id": property_id,
+            "chunks": all_chunk_records,
+            "chunks_count": len(all_chunk_records),
+            "metadata": document_metadata,
+            "records": rows,
+            "normalized_records": normalized_records,
         }
 
     # ========================================================
@@ -333,7 +771,7 @@ def ingest_file(
         )
 
         raise TypeError(
-            f"Expected loader to return str, "
+            "Expected loader to return str, "
             f"got {type(raw_content).__name__}"
         )
 
@@ -344,7 +782,6 @@ def ingest_file(
     # --------------------------------------------------------
 
     if not text:
-
         logger.warning(
             "No text extracted from file | file=%s",
             file_path,
@@ -367,8 +804,26 @@ def ingest_file(
     )
 
     # --------------------------------------------------------
-    # Chunking
+    # Property normalization
     # --------------------------------------------------------
+
+    normalized_fields = _normalize_text(text)
+
+    document_metadata = _merge_metadata(
+        document_metadata,
+        normalized_fields,
+    )
+
+    logger.info(
+        "Text normalization completed | "
+        "file=%s | fields=%d",
+        file_path,
+        len(normalized_fields),
+    )
+
+    # ========================================================
+    # CHUNKING
+    # ========================================================
 
     chunks = chunk_text(
         text,
@@ -377,7 +832,6 @@ def ingest_file(
     )
 
     if not chunks:
-
         logger.warning(
             "No chunks generated | file=%s",
             file_path,
@@ -391,6 +845,7 @@ def ingest_file(
             "chunks": [],
             "chunks_count": 0,
             "metadata": document_metadata,
+            "normalized_fields": normalized_fields,
         }
 
     logger.info(
@@ -399,16 +854,14 @@ def ingest_file(
         len(chunks),
     )
 
-    # --------------------------------------------------------
-    # Build chunk records
-    # --------------------------------------------------------
+    # ========================================================
+    # BUILD CHUNK RECORDS
+    # ========================================================
 
     total_chunks = len(chunks)
-
     chunk_records: list[dict[str, Any]] = []
 
     for index, chunk in enumerate(chunks):
-
         chunk_metadata = add_chunk_metadata(
             document_metadata,
             chunk_index=index,
@@ -419,6 +872,7 @@ def ingest_file(
             path,
             index,
             property_id,
+            record_index=None,
         )
 
         chunk_records.append(
@@ -429,9 +883,9 @@ def ingest_file(
             }
         )
 
-    # --------------------------------------------------------
-    # Return ingestion result
-    # --------------------------------------------------------
+    # ========================================================
+    # RETURN INGESTION RESULT
+    # ========================================================
 
     logger.info(
         "File ingestion completed | "
@@ -448,6 +902,7 @@ def ingest_file(
         "chunks": chunk_records,
         "chunks_count": total_chunks,
         "metadata": document_metadata,
+        "normalized_fields": normalized_fields,
     }
 
 
@@ -467,16 +922,8 @@ def ingest_directory(
     """
     Ingest all supported files inside a directory.
 
-    Current flow:
-
-        directory
-            -> files
-            -> ingest_file()
-            -> chunks
-
-    Embeddings and vector storage are not performed here yet.
+    Embeddings and vector storage are not performed here.
     """
-
     directory = Path(directory_path)
 
     logger.info(
@@ -503,22 +950,23 @@ def ingest_directory(
     # --------------------------------------------------------
 
     if recursive:
-
         files = [
             path
             for path in directory.rglob("*")
             if path.is_file()
             and is_supported(str(path))
         ]
-
     else:
-
         files = [
             path
             for path in directory.iterdir()
             if path.is_file()
             and is_supported(str(path))
         ]
+
+    files.sort(
+        key=lambda path: str(path).lower()
+    )
 
     logger.info(
         "Supported files discovered | "
@@ -532,7 +980,6 @@ def ingest_directory(
     # --------------------------------------------------------
 
     total = len(files)
-
     successful = 0
     skipped = 0
     failed = 0
@@ -545,14 +992,12 @@ def ingest_directory(
     # --------------------------------------------------------
 
     for path in files:
-
         logger.info(
             "Processing file | file=%s",
             path,
         )
 
         try:
-
             result = ingest_file(
                 str(path),
                 property_id=property_id,
@@ -566,12 +1011,13 @@ def ingest_directory(
             status = result.get("status")
 
             if status == "success":
-
                 successful += 1
 
-                total_chunks += result.get(
-                    "chunks_count",
-                    0,
+                total_chunks += int(
+                    result.get(
+                        "chunks_count",
+                        0,
+                    )
                 )
 
             elif status in {
@@ -579,11 +1025,9 @@ def ingest_directory(
                 "empty",
                 "image_loaded",
             }:
-
                 skipped += 1
 
         except Exception as exc:
-
             failed += 1
 
             logger.exception(
@@ -628,3 +1072,4 @@ def ingest_directory(
     )
 
     return summary
+

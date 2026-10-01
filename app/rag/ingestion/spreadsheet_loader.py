@@ -1,18 +1,55 @@
-from pathlib import Path
+"""
+Spreadsheet Loader.
+
+Responsibilities:
+
+    CSV / XLSX / XLS
+        -> load spreadsheet
+        -> clean rows and columns
+        -> return structured records
+
+The loader intentionally does NOT:
+    - normalize property fields
+    - create embeddings
+    - chunk text
+    - store vectors
+    - perform retrieval
+
+Those responsibilities belong to downstream RAG components.
+"""
+
+from __future__ import annotations
+
 import logging
+from pathlib import Path
+from typing import Any
 
 import pandas as pd
+
 
 logger = logging.getLogger(__name__)
 
 
-SUPPORTED_EXTENSIONS = {".csv", ".xlsx", ".xls"}
+# ============================================================
+# Supported extensions
+# ============================================================
+
+SUPPORTED_EXTENSIONS = {
+    ".csv",
+    ".xlsx",
+    ".xls",
+}
 
 
-def parse_spreadsheet(file_path: str) -> str:
+# ============================================================
+# Main parser
+# ============================================================
+
+def parse_spreadsheet(
+    file_path: str,
+) -> list[dict[str, Any]]:
     """
-    Extract spreadsheet data and convert it into structured text
-    suitable for downstream RAG processing.
+    Load a spreadsheet and return structured records.
 
     Supported formats:
         - CSV
@@ -20,25 +57,61 @@ def parse_spreadsheet(file_path: str) -> str:
         - XLS
 
     Args:
-        file_path: Path to the spreadsheet file.
+        file_path:
+            Path to the spreadsheet file.
 
     Returns:
-        Spreadsheet content as structured text.
+        A list of dictionaries where each dictionary represents
+        one spreadsheet row.
+
+        Example:
+
+            [
+                {
+                    "Property ID": "P001",
+                    "Type": "Apartment",
+                    "Price": 5000000,
+                    "Bedrooms": 3,
+                    "Location": "New Cairo",
+                },
+                ...
+            ]
 
     Raises:
-        FileNotFoundError: If the file does not exist.
-        ValueError: If the file format is unsupported.
-        Exception: If parsing fails.
+        FileNotFoundError:
+            If the file does not exist.
+
+        ValueError:
+            If the file format is unsupported.
+
+        TypeError:
+            If the loaded spreadsheet cannot be converted
+            into records.
+
+        Exception:
+            If spreadsheet parsing fails.
     """
 
-    logger.info("Starting spreadsheet parsing: %s", file_path)
+    logger.info(
+        "Starting spreadsheet parsing | file=%s",
+        file_path,
+    )
 
     try:
         path = Path(file_path)
 
+        # ----------------------------------------------------
+        # Validate file
+        # ----------------------------------------------------
+
         if not path.exists():
             raise FileNotFoundError(
                 f"Spreadsheet file not found: {file_path}"
+            )
+
+        if not path.is_file():
+            raise ValueError(
+                f"Spreadsheet path is not a file: {file_path}"
             )
 
         extension = path.suffix.lower()
@@ -46,12 +119,12 @@ def parse_spreadsheet(file_path: str) -> str:
         if extension not in SUPPORTED_EXTENSIONS:
             raise ValueError(
                 f"Unsupported spreadsheet format: {extension}. "
-                f"Supported formats: {SUPPORTED_EXTENSIONS}"
+                f"Supported formats: {sorted(SUPPORTED_EXTENSIONS)}"
             )
 
-        # ---------------------------------------------------------
+        # ----------------------------------------------------
         # Load spreadsheet
-        # ---------------------------------------------------------
+        # ----------------------------------------------------
 
         if extension == ".csv":
             dataframe = pd.read_csv(path)
@@ -60,74 +133,128 @@ def parse_spreadsheet(file_path: str) -> str:
             dataframe = pd.read_excel(path)
 
         logger.info(
-            "Spreadsheet loaded successfully | file=%s | rows=%d | columns=%d",
+            "Spreadsheet loaded successfully | "
+            "file=%s | rows=%d | columns=%d",
             file_path,
             len(dataframe),
             len(dataframe.columns),
         )
 
+        # ----------------------------------------------------
+        # Empty spreadsheet
+        # ----------------------------------------------------
+
         if dataframe.empty:
             logger.warning(
-                "Spreadsheet is empty: %s",
+                "Spreadsheet is empty | file=%s",
                 file_path,
             )
-            return ""
 
-        # ---------------------------------------------------------
-        # Clean data
-        # ---------------------------------------------------------
+            return []
 
-        dataframe = dataframe.dropna(
-            how="all"
-        )
+        # ----------------------------------------------------
+        # Clean column names
+        # ----------------------------------------------------
 
-        dataframe = dataframe.fillna("")
-
-        # Convert column names to strings
         dataframe.columns = [
             str(column).strip()
             for column in dataframe.columns
         ]
 
-        # ---------------------------------------------------------
-        # Convert rows into RAG-friendly text
-        # ---------------------------------------------------------
+        # Remove completely unnamed columns that can sometimes
+        # appear in exported spreadsheets.
+        dataframe = dataframe.loc[
+            :,
+            [
+                column
+                for column in dataframe.columns
+                if column
+                and not column.lower().startswith("unnamed:")
+            ],
+        ]
 
-        documents = []
+        # ----------------------------------------------------
+        # Remove completely empty rows
+        # ----------------------------------------------------
 
-        for index, row in dataframe.iterrows():
-
-            row_data = []
-
-            for column in dataframe.columns:
-
-                value = str(row[column]).strip()
-
-                if not value:
-                    continue
-
-                row_data.append(
-                    f"{column}: {value}"
-                )
-
-            if row_data:
-                document = (
-                    f"Record {index + 1}\n"
-                    + "\n".join(row_data)
-                )
-
-                documents.append(document)
-
-        full_text = "\n\n".join(documents)
-
-        logger.info(
-            "Spreadsheet parsed successfully | file=%s | characters=%d | records=%d",
-            file_path,
-            len(full_text),
-            len(documents),
+        dataframe = dataframe.dropna(
+            how="all"
         )
 
-        return full_text
+        if dataframe.empty:
+            logger.warning(
+                "Spreadsheet contains no non-empty rows | file=%s",
+                file_path,
+            )
+
+            return []
+
+        # ----------------------------------------------------
+        # Convert NaN / missing values
+        # ----------------------------------------------------
+
+        dataframe = dataframe.where(
+            pd.notna(dataframe),
+            None,
+        )
+
+        # ----------------------------------------------------
+        # Convert dataframe to records
+        # ----------------------------------------------------
+
+        records: list[dict[str, Any]] = []
+
+        for row_number, row in enumerate(
+            dataframe.to_dict(orient="records"),
+            start=1,
+        ):
+            cleaned_row: dict[str, Any] = {}
+
+            for column, value in row.items():
+
+                column_name = str(column).strip()
+
+                if not column_name:
+                    continue
+
+                # Preserve non-string values such as:
+                # int / float / bool where possible.
+                if isinstance(value, str):
+                    value = value.strip()
+
+                    if not value:
+                        continue
+
+                elif pd.isna(value):
+                    continue
+
+                cleaned_row[column_name] = value
+
+            # Skip rows where all values are empty.
+            if not cleaned_row:
+                continue
+
+            records.append(cleaned_row)
+
+        logger.info(
+            "Spreadsheet parsed successfully | "
+            "file=%s | records=%d",
+            file_path,
+            len(records),
+        )
+
+        return records
+
+    except (
+        FileNotFoundError,
+        ValueError,
+        TypeError,
+    ):
+        logger.exception(
+            "Spreadsheet validation failed | file=%s",
+            file_path,
+        )
+        raise
 
     except Exception:
         logger.exception(
@@ -135,4 +262,3 @@ def parse_spreadsheet(file_path: str) -> str:
             file_path,
         )
         raise
-

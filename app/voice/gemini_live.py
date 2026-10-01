@@ -3,7 +3,7 @@
 from google import genai
 from google.genai import types
 
-from app.helpers.config import get_settings
+from ..helpers.config import get_settings
 
 
 def create_gemini_client() -> genai.Client:

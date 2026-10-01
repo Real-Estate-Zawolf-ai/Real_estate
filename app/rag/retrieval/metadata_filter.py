@@ -1,147 +1,316 @@
+"""Build deterministic hard filters from customer requirements.
+
+This module translates structured customer requirements into a
+vector-database-agnostic ``MetadataFilter`` representation.
+
+Hard constraints such as price, area, bedrooms, location,
+transaction type, and availability should be enforced deterministically
+rather than relying on semantic similarity alone.
+
+The resulting filter can be translated by the retrieval layer into the
+native filtering syntax of Qdrant, pgvector, or another backend.
 """
-metadata_filter.py
 
-Translates extracted customer requirements (structured, from the
-conversational agent's requirement-extraction step) into explicit
-filters over property metadata — the "hard constraints" layer.
-
-Per the project's AI design principle: hard constraints (price,
-bedrooms, location, purpose, availability) must be enforced by
-deterministic filtering, never left to semantic similarity alone.
-This keeps the system from recommending a 6M EGP apartment when the
-customer said "max 5M".
-
-This module is vector-DB-agnostic: it builds a `MetadataFilter` object
-that `hybrid_search.py` translates into the specific query-DSL of
-whichever backend is in use (Qdrant, pgvector, etc.).
-"""
+from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
+
+
+# ---------------------------------------------------------------------------
+# Constraints
+# ---------------------------------------------------------------------------
 
 
 @dataclass
 class RangeConstraint:
-    """A numeric range constraint, e.g. price <= 5,000,000."""
+    """A numeric range constraint, such as ``price <= 5_000_000``."""
+
     field: str
-    gte: Optional[float] = None
-    lte: Optional[float] = None
+    gte: float | None = None
+    lte: float | None = None
 
 
 @dataclass
 class EqualityConstraint:
-    """An exact-match constraint, e.g. location == 'New Cairo'."""
+    """An exact-match constraint, such as ``location == 'New Cairo'``."""
+
     field: str
     value: Any
 
 
 @dataclass
 class MetadataFilter:
-    """A backend-agnostic representation of the hard constraints to
-    apply before/alongside semantic search.
-    """
-    equality: List[EqualityConstraint] = field(default_factory=list)
-    ranges: List[RangeConstraint] = field(default_factory=list)
+    """Backend-agnostic representation of hard metadata constraints."""
+
+    equality: list[EqualityConstraint] = field(default_factory=list)
+    ranges: list[RangeConstraint] = field(default_factory=list)
 
     def is_empty(self) -> bool:
+        """Return True when no filtering constraints are defined."""
+
         return not self.equality and not self.ranges
 
     def describe(self) -> str:
-        """Human-readable summary — useful for logging/tracing so you can
-        see exactly what constraints were applied to a given query.
-        """
-        parts = [f"{c.field} == {c.value!r}" for c in self.equality]
-        for r in self.ranges:
-            if r.gte is not None and r.lte is not None:
-                parts.append(f"{r.gte} <= {r.field} <= {r.lte}")
-            elif r.gte is not None:
-                parts.append(f"{r.field} >= {r.gte}")
-            elif r.lte is not None:
-                parts.append(f"{r.field} <= {r.lte}")
+        """Return a human-readable representation for logging/tracing."""
+
+        parts = [
+            f"{constraint.field} == {constraint.value!r}"
+            for constraint in self.equality
+        ]
+
+        for constraint in self.ranges:
+            if (
+                constraint.gte is not None
+                and constraint.lte is not None
+            ):
+                parts.append(
+                    f"{constraint.gte} <= "
+                    f"{constraint.field} <= "
+                    f"{constraint.lte}"
+                )
+            elif constraint.gte is not None:
+                parts.append(
+                    f"{constraint.field} >= {constraint.gte}"
+                )
+            elif constraint.lte is not None:
+                parts.append(
+                    f"{constraint.field} <= {constraint.lte}"
+                )
+
         return " AND ".join(parts) if parts else "(no constraints)"
 
 
-# Maps requirement-extraction field names to property-metadata field
-# names. Adjust if your extracted-requirement schema and property
-# schema diverge (they're identical in the example data model, but
-# real CRM data is rarely that clean).
-REQUIREMENT_TO_METADATA_FIELD = {
+# ---------------------------------------------------------------------------
+# Requirement → canonical metadata mapping
+# ---------------------------------------------------------------------------
+#
+# These canonical names must stay aligned with the normalization layer:
+#
+#   property_id
+#   property_type
+#   transaction_type
+#   price
+#   currency
+#   area
+#   area_unit
+#   bedrooms
+#   bathrooms
+#   location
+#   city
+#   district
+#   neighborhood
+#   compound
+#   developer
+#   payment_plan
+#   availability
+#   finishing
+#   delivery
+#
+# ---------------------------------------------------------------------------
+
+REQUIREMENT_TO_METADATA_FIELD: dict[
+    str,
+    str | tuple[str, str],
+] = {
+    # Location
     "location": "location",
+    "city": "city",
+    "district": "district",
+    "neighborhood": "neighborhood",
+    "compound": "compound",
+
+    # Property classification
     "property_type": "property_type",
-    "purpose": "purpose",          # "sale" | "rent"
+    "transaction_type": "transaction_type",
+    "purpose": "transaction_type",
+    "developer": "developer",
+
+    # Property attributes
+    "finishing": "finishing",
+    "delivery": "delivery",
+    "availability": "availability",
+
+    # Financial / payment
+    "currency": "currency",
+    "payment_type": "payment_plan",
+    "payment_plan": "payment_plan",
+
+    # Exact numeric values
     "bedrooms": "bedrooms",
     "bathrooms": "bathrooms",
-    "payment_type": "payment_plan",
-    "max_price": ("price", "lte"),
+
+    # Price ranges
     "min_price": ("price", "gte"),
-    "min_area_sqm": ("area_sqm", "gte"),
-    "max_area_sqm": ("area_sqm", "lte"),
+    "max_price": ("price", "lte"),
+
+    # Area ranges
+    "min_area": ("area", "gte"),
+    "max_area": ("area", "lte"),
+    "min_area_sqm": ("area", "gte"),
+    "max_area_sqm": ("area", "lte"),
+
+    # Bedroom ranges
+    "min_bedrooms": ("bedrooms", "gte"),
+    "max_bedrooms": ("bedrooms", "lte"),
+
+    # Bathroom ranges
+    "min_bathrooms": ("bathrooms", "gte"),
+    "max_bathrooms": ("bathrooms", "lte"),
 }
 
 
 def build_metadata_filter(
-    requirements: Dict[str, Any],
-    always_available_only: bool = True,
+    requirements: dict[str, Any],
+    always_available_only: bool = False,
 ) -> MetadataFilter:
-    """Convert extracted customer requirements into a MetadataFilter.
+    """Convert structured customer requirements into hard filters.
 
-    `requirements` is the structured dict produced by the agent's
-    requirement-extraction step, e.g.:
+    Example:
         {
-            "purpose": "sale",
+            "transaction_type": "sale",
             "location": "New Cairo",
             "property_type": "apartment",
-            "bedrooms": 3,
-            "max_price": 5000000,
-            "payment_type": "installment",
+            "min_bedrooms": 3,
+            "max_price": 5_000_000,
         }
 
-    Missing/None fields are simply skipped — we only filter on what the
-    customer actually specified.
+    ``None`` values and unknown requirement fields are ignored.
+
+    Args:
+        requirements:
+            Structured requirements extracted from the customer request.
+
+        always_available_only:
+            When True, add the explicit constraint
+            ``availability == "available"``.
+
+            This remains disabled by default because the current property
+            dataset does not consistently guarantee a canonical availability
+            value.
+
+    Returns:
+        A backend-agnostic ``MetadataFilter``.
     """
-    equality: List[EqualityConstraint] = []
-    ranges_by_field: Dict[str, RangeConstraint] = {}
+
+    if not isinstance(requirements, dict):
+        raise TypeError("requirements must be a dictionary")
+
+    equality: list[EqualityConstraint] = []
+    ranges_by_field: dict[str, RangeConstraint] = {}
 
     for req_field, value in requirements.items():
         if value is None:
             continue
 
         mapping = REQUIREMENT_TO_METADATA_FIELD.get(req_field)
+
         if mapping is None:
-            continue  # unknown/unmapped requirement field — ignore, don't error
+            # Unknown requirements are intentionally ignored.
+            # Retrieval should not fail because an extractor produced
+            # an unsupported field.
+            continue
 
         if isinstance(mapping, tuple):
-            meta_field, bound = mapping
-            rc = ranges_by_field.setdefault(meta_field, RangeConstraint(field=meta_field))
-            setattr(rc, bound, float(value))
-        else:
-            equality.append(EqualityConstraint(field=mapping, value=value))
+            metadata_field, bound = mapping
+
+            try:
+                numeric_value = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"Requirement '{req_field}' must be numeric, "
+                    f"got {value!r}"
+                ) from exc
+
+            constraint = ranges_by_field.setdefault(
+                metadata_field,
+                RangeConstraint(field=metadata_field),
+            )
+
+            setattr(constraint, bound, numeric_value)
+            continue
+
+        equality.append(
+            EqualityConstraint(
+                field=mapping,
+                value=value,
+            )
+        )
 
     if always_available_only:
-        equality.append(EqualityConstraint(field="availability", value="available"))
+        equality.append(
+            EqualityConstraint(
+                field="availability",
+                value="available",
+            )
+        )
 
-    return MetadataFilter(equality=equality, ranges=list(ranges_by_field.values()))
+    return MetadataFilter(
+        equality=equality,
+        ranges=list(ranges_by_field.values()),
+    )
 
 
-def matches(property_metadata: Dict[str, Any], filt: MetadataFilter) -> bool:
-    """Pure-Python evaluation of a MetadataFilter against a single
-    property's metadata dict. Useful for:
-      - Unit testing filter logic without a real vector DB.
-      - A fallback/dev-mode in-memory filter path.
-    Production retrieval should push these constraints down into the
-    vector DB's native filter syntax for efficiency (see hybrid_search.py).
+# ---------------------------------------------------------------------------
+# Pure-Python evaluator
+# ---------------------------------------------------------------------------
+
+
+def matches(
+    property_metadata: dict[str, Any],
+    filt: MetadataFilter,
+) -> bool:
+    """Evaluate a MetadataFilter against one property's metadata.
+
+    This function is useful for:
+
+    - Unit testing filter behavior.
+    - Development and in-memory retrieval.
+    - Validating filters before backend integration.
+
+    Production retrieval should push these constraints into the vector
+    database's native filtering mechanism whenever possible.
     """
-    for c in filt.equality:
-        if property_metadata.get(c.field) != c.value:
+
+    if not isinstance(property_metadata, dict):
+        return False
+
+    if not isinstance(filt, MetadataFilter):
+        raise TypeError("filt must be a MetadataFilter")
+
+    # ------------------------------------------------------------------
+    # Equality constraints
+    # ------------------------------------------------------------------
+
+    for constraint in filt.equality:
+        if property_metadata.get(constraint.field) != constraint.value:
             return False
 
-    for r in filt.ranges:
-        val = property_metadata.get(r.field)
-        if val is None:
+    # ------------------------------------------------------------------
+    # Range constraints
+    # ------------------------------------------------------------------
+
+    for constraint in filt.ranges:
+        value = property_metadata.get(constraint.field)
+
+        if value is None:
             return False
-        if r.gte is not None and val < r.gte:
+
+        try:
+            numeric_value = float(value)
+        except (TypeError, ValueError):
             return False
-        if r.lte is not None and val > r.lte:
+
+        if (
+            constraint.gte is not None
+            and numeric_value < constraint.gte
+        ):
+            return False
+
+        if (
+            constraint.lte is not None
+            and numeric_value > constraint.lte
+        ):
             return False
 
     return True

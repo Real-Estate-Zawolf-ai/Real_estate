@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, WebSocket
 
-from app.channels.website import handle_website_voice
+from ...channels.website import handle_website_voice
 
 
 router = APIRouter(prefix="/website", tags=["website"])

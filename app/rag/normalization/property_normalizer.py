@@ -1,3 +1,5 @@
+"""Normalize heterogeneous real-estate property data."""
+
 from __future__ import annotations
 
 import logging
@@ -5,7 +7,14 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from .field_mapper import FieldMapper
+
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Canonical property
+# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -15,7 +24,10 @@ class NormalizedProperty:
 
     Missing values remain None.
     Original text is preserved.
+    Unknown source fields are preserved in ``extra``.
     """
+
+    property_id: str | None = None
 
     property_type: str | None = None
     transaction_type: str | None = None
@@ -30,39 +42,55 @@ class NormalizedProperty:
     bathrooms: int | None = None
 
     location: str | None = None
+    city: str | None = None
+    district: str | None = None
+    neighborhood: str | None = None
     compound: str | None = None
     developer: str | None = None
 
+    payment_plan: str | None = None
+    availability: str | None = None
     finishing: str | None = None
     delivery: str | None = None
 
     amenities: list[str] = field(default_factory=list)
 
+    source: str | None = None
+    url: str | None = None
+
     raw_text: str = ""
     extra: dict[str, Any] = field(default_factory=dict)
 
 
+# ---------------------------------------------------------------------------
+# Normalizer
+# ---------------------------------------------------------------------------
+
+
 class PropertyNormalizer:
     """
-    Normalize real-estate information from OCR/text.
+    Normalize real-estate information from structured fields and text.
+
+    Structured source fields are first mapped through ``FieldMapper``.
+    Free text can then be used to fill fields that are still missing.
 
     Input:
-        Cleaned text produced by the OCR pipeline.
+        - cleaned OCR/text
+        - optional structured source fields
 
     Output:
         NormalizedProperty
 
     Pipeline:
-
-        OCR
+        OCR / source data
           ↓
         DocumentParser
           ↓
         OCRPostProcessor
           ↓
         PropertyNormalizer
-          ↓
-        FieldMapper
+          ├── FieldMapper for structured fields
+          └── deterministic text extraction
           ↓
         Embeddings / Retrieval
 
@@ -195,71 +223,92 @@ class PropertyNormalizer:
         r"(?:حمامات?|حمام)\s*[:\-]?\s*(\d+)",
     ]
 
-    def normalize(self, text: str) -> NormalizedProperty:
+    def __init__(
+        self,
+        field_mapper: FieldMapper | None = None,
+    ) -> None:
         """
-        Normalize a real-estate text document.
+        Initialize the property normalizer.
+
+        Args:
+            field_mapper:
+                Optional FieldMapper instance. A default mapper is created
+                when one is not provided.
+        """
+        self.field_mapper = field_mapper or FieldMapper()
+
+    # -----------------------------------------------------------------------
+    # Public API
+    # -----------------------------------------------------------------------
+
+    def normalize(
+        self,
+        text: str = "",
+        fields: dict[str, Any] | None = None,
+    ) -> NormalizedProperty:
+        """
+        Normalize a real-estate property.
+
+        Structured fields are mapped first. Text extraction is then used only
+        to fill fields that are still missing.
+
+        Args:
+            text:
+                Cleaned OCR/free text.
+            fields:
+                Optional source-specific structured fields, such as CSV
+                columns or database fields.
+
+        Returns:
+            NormalizedProperty
         """
 
-        if not text or not text.strip():
-            logger.warning(
-                "Property normalization skipped: empty text"
-            )
-            return NormalizedProperty(raw_text="")
+        if text is None:
+            text = ""
+
+        if not isinstance(text, str):
+            raise TypeError("text must be a string")
 
         text = text.strip()
 
+        if fields is not None and not isinstance(fields, dict):
+            raise TypeError("fields must be a dictionary")
+
         logger.info(
-            "Starting property normalization | characters=%d",
+            "Starting property normalization | characters=%d | "
+            "structured_fields=%d",
             len(text),
+            len(fields or {}),
         )
 
         normalized = NormalizedProperty(raw_text=text)
 
-        normalized.property_type = self._extract_property_type(text)
+        # -------------------------------------------------------------------
+        # 1. Map structured source fields
+        # -------------------------------------------------------------------
 
-        normalized.transaction_type = (
-            self._extract_transaction_type(text)
-        )
+        if fields:
+            mapping_result = self.field_mapper.map_fields(fields)
 
-        normalized.price, normalized.currency = (
-            self._extract_price(text)
-        )
-
-        normalized.area, normalized.area_unit = (
-            self._extract_area(text)
-        )
-
-        normalized.bedrooms = self._extract_integer(
-            text,
-            self.BEDROOM_PATTERNS,
-        )
-
-        normalized.bathrooms = self._extract_integer(
-            text,
-            self.BATHROOM_PATTERNS,
-        )
-
-        normalized.finishing = (
-            self._extract_from_patterns(
-                text,
-                self.FINISHING_PATTERNS,
+            self._apply_mapped_fields(
+                normalized,
+                mapping_result.mapped,
             )
-        )
 
-        normalized.location = self._extract_location(text)
+            normalized.extra.update(mapping_result.unmapped)
 
-        normalized.compound = self._extract_compound(text)
+        # -------------------------------------------------------------------
+        # 2. Fill missing values from text
+        # -------------------------------------------------------------------
 
-        normalized.developer = self._extract_developer(text)
-
-        normalized.delivery = self._extract_delivery(text)
-
-        normalized.amenities = self._extract_amenities(text)
+        if text:
+            self._fill_missing_from_text(normalized, text)
 
         logger.info(
             "Property normalization completed | "
-            "type=%s | transaction=%s | price=%s | "
-            "area=%s | bedrooms=%s | bathrooms=%s",
+            "property_id=%s | type=%s | transaction=%s | "
+            "price=%s | area=%s | bedrooms=%s | bathrooms=%s",
+            normalized.property_id,
             normalized.property_type,
             normalized.transaction_type,
             normalized.price,
@@ -272,15 +321,20 @@ class PropertyNormalizer:
 
     def normalize_to_dict(
         self,
-        text: str,
+        text: str = "",
+        fields: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
-        Normalize property text and return a dictionary.
+        Normalize property data and return a dictionary.
         """
 
-        property_data = self.normalize(text)
+        property_data = self.normalize(
+            text=text,
+            fields=fields,
+        )
 
         return {
+            "property_id": property_data.property_id,
             "property_type": property_data.property_type,
             "transaction_type": property_data.transaction_type,
             "price": property_data.price,
@@ -290,14 +344,158 @@ class PropertyNormalizer:
             "bedrooms": property_data.bedrooms,
             "bathrooms": property_data.bathrooms,
             "location": property_data.location,
+            "city": property_data.city,
+            "district": property_data.district,
+            "neighborhood": property_data.neighborhood,
             "compound": property_data.compound,
             "developer": property_data.developer,
+            "payment_plan": property_data.payment_plan,
+            "availability": property_data.availability,
             "finishing": property_data.finishing,
             "delivery": property_data.delivery,
             "amenities": property_data.amenities,
+            "source": property_data.source,
+            "url": property_data.url,
             "raw_text": property_data.raw_text,
             "extra": property_data.extra,
         }
+
+    # -----------------------------------------------------------------------
+    # Structured field handling
+    # -----------------------------------------------------------------------
+
+    def _apply_mapped_fields(
+        self,
+        normalized: NormalizedProperty,
+        mapped: dict[str, Any],
+    ) -> None:
+        """
+        Apply canonical structured fields to NormalizedProperty.
+
+        Values are normalized only where the target field has an explicit
+        numeric type. No missing values are invented.
+        """
+
+        if not mapped:
+            return
+
+        numeric_float_fields = {
+            "price",
+            "area",
+        }
+
+        integer_fields = {
+            "bedrooms",
+            "bathrooms",
+        }
+
+        for field_name, value in mapped.items():
+            if not hasattr(normalized, field_name):
+                normalized.extra[field_name] = value
+                continue
+
+            if value is None:
+                continue
+
+            if field_name in numeric_float_fields:
+                converted = self._coerce_float(value)
+
+                if converted is not None:
+                    setattr(normalized, field_name, converted)
+                else:
+                    normalized.extra[field_name] = value
+
+                continue
+
+            if field_name in integer_fields:
+                converted = self._coerce_int(value)
+
+                if converted is not None:
+                    setattr(normalized, field_name, converted)
+                else:
+                    normalized.extra[field_name] = value
+
+                continue
+
+            if field_name == "amenities":
+                normalized.amenities = self._normalize_amenities(value)
+                continue
+
+            if isinstance(value, str):
+                value = value.strip()
+
+            setattr(normalized, field_name, value)
+
+    # -----------------------------------------------------------------------
+    # Text extraction
+    # -----------------------------------------------------------------------
+
+    def _fill_missing_from_text(
+        self,
+        normalized: NormalizedProperty,
+        text: str,
+    ) -> None:
+        """
+        Fill only missing canonical fields from free text.
+        """
+
+        if normalized.property_type is None:
+            normalized.property_type = self._extract_property_type(text)
+
+        if normalized.transaction_type is None:
+            normalized.transaction_type = self._extract_transaction_type(text)
+
+        if normalized.price is None:
+            price, currency = self._extract_price(text)
+            normalized.price = price
+
+            if normalized.currency is None:
+                normalized.currency = currency
+
+        elif normalized.currency is None:
+            normalized.currency = self._detect_currency(
+                self._normalize_numbers(text)
+            )
+
+        if normalized.area is None:
+            area, area_unit = self._extract_area(text)
+            normalized.area = area
+
+            if normalized.area_unit is None:
+                normalized.area_unit = area_unit
+
+        if normalized.bedrooms is None:
+            normalized.bedrooms = self._extract_integer(
+                text,
+                self.BEDROOM_PATTERNS,
+            )
+
+        if normalized.bathrooms is None:
+            normalized.bathrooms = self._extract_integer(
+                text,
+                self.BATHROOM_PATTERNS,
+            )
+
+        if normalized.finishing is None:
+            normalized.finishing = self._extract_from_patterns(
+                text,
+                self.FINISHING_PATTERNS,
+            )
+
+        if normalized.location is None:
+            normalized.location = self._extract_location(text)
+
+        if normalized.compound is None:
+            normalized.compound = self._extract_compound(text)
+
+        if normalized.developer is None:
+            normalized.developer = self._extract_developer(text)
+
+        if normalized.delivery is None:
+            normalized.delivery = self._extract_delivery(text)
+
+        if not normalized.amenities:
+            normalized.amenities = self._extract_amenities(text)
 
     def _extract_property_type(
         self,
@@ -331,7 +529,6 @@ class PropertyNormalizer:
         """
 
         normalized_text = self._normalize_numbers(text)
-
         currency = self._detect_currency(normalized_text)
 
         # Compact million notation.
@@ -353,13 +550,10 @@ class PropertyNormalizer:
         price_patterns = [
             r"(?:price|السعر)\s*[:\-]?\s*"
             r"([\d,]+(?:\.\d+)?)",
-
             r"([\d,]+(?:\.\d+)?)\s*"
             r"(?:egp|le|l\.e\.|جنيه|جنية|ج\.م)",
-
             r"(?:egp|le|l\.e\.|جنيه|جنية|ج\.م)\s*"
             r"([\d,]+(?:\.\d+)?)",
-
             r"\$\s*([\d,]+(?:\.\d+)?)",
         ]
 
@@ -384,7 +578,6 @@ class PropertyNormalizer:
         self,
         text: str,
     ) -> tuple[float | None, str | None]:
-
         normalized_text = self._normalize_numbers(text)
 
         for pattern in self.AREA_PATTERNS:
@@ -411,7 +604,6 @@ class PropertyNormalizer:
         text: str,
         patterns: list[str],
     ) -> int | None:
-
         normalized_text = self._normalize_numbers(text)
 
         for pattern in patterns:
@@ -439,7 +631,6 @@ class PropertyNormalizer:
         self,
         text: str,
     ) -> str | None:
-
         patterns = [
             r"(?:location|loc|الموقع)\s*[:\-]\s*([^\n,]+)",
             r"(?:located\s+in|في)\s+"
@@ -465,7 +656,6 @@ class PropertyNormalizer:
         self,
         text: str,
     ) -> str | None:
-
         patterns = [
             r"(?:compound|project|كمبوند|مشروع)"
             r"\s*[:\-]\s*([^\n,]+)",
@@ -490,7 +680,6 @@ class PropertyNormalizer:
         self,
         text: str,
     ) -> str | None:
-
         patterns = [
             r"(?:developer|developed\s+by|المطور"
             r"|المطور\s+العقاري)"
@@ -516,7 +705,6 @@ class PropertyNormalizer:
         self,
         text: str,
     ) -> str | None:
-
         patterns = [
             r"(?:delivery|handover|التسليم)"
             r"\s*[:\-]?\s*([^\n]+)",
@@ -590,7 +778,6 @@ class PropertyNormalizer:
         }
 
         text_lower = text.lower()
-
         found: list[str] = []
 
         for canonical_name, variants in amenities_map.items():
@@ -601,12 +788,15 @@ class PropertyNormalizer:
 
         return found
 
+    # -----------------------------------------------------------------------
+    # Pattern / value helpers
+    # -----------------------------------------------------------------------
+
     def _extract_from_patterns(
         self,
         text: str,
         pattern_groups: dict[str, list[str]],
     ) -> str | None:
-
         for canonical_value, patterns in pattern_groups.items():
             for pattern in patterns:
                 if re.search(
@@ -622,7 +812,6 @@ class PropertyNormalizer:
         self,
         text: str,
     ) -> str | None:
-
         for pattern, currency in self.CURRENCY_PATTERNS:
             if re.search(
                 pattern,
@@ -630,6 +819,88 @@ class PropertyNormalizer:
                 flags=re.IGNORECASE,
             ):
                 return currency
+
+        return None
+
+    @staticmethod
+    def _normalize_amenities(
+        value: Any,
+    ) -> list[str]:
+        """
+        Normalize structured amenities into a list of strings.
+        """
+
+        if value is None:
+            return []
+
+        if isinstance(value, str):
+            parts = re.split(r"[,;|]", value)
+            return [
+                item.strip()
+                for item in parts
+                if item.strip()
+            ]
+
+        if isinstance(value, (list, tuple, set)):
+            return [
+                str(item).strip()
+                for item in value
+                if item is not None and str(item).strip()
+            ]
+
+        return [str(value).strip()]
+
+    @staticmethod
+    def _coerce_float(
+        value: Any,
+    ) -> float | None:
+        """
+        Convert a structured numeric value to float.
+        """
+
+        if value is None:
+            return None
+
+        if isinstance(value, bool):
+            return None
+
+        if isinstance(value, (int, float)):
+            return float(value)
+
+        if isinstance(value, str):
+            return PropertyNormalizer._to_float(value)
+
+        return None
+
+    @staticmethod
+    def _coerce_int(
+        value: Any,
+    ) -> int | None:
+        """
+        Convert a structured numeric value to int.
+        """
+
+        if value is None:
+            return None
+
+        if isinstance(value, bool):
+            return None
+
+        if isinstance(value, int):
+            return value
+
+        if isinstance(value, float):
+            return int(value)
+
+        if isinstance(value, str):
+            normalized = PropertyNormalizer._normalize_numbers(
+                value
+            ).strip()
+
+            try:
+                return int(float(normalized))
+            except ValueError:
+                return None
 
         return None
 
@@ -668,6 +939,7 @@ class PropertyNormalizer:
             3,500,000
             150.5
             150,5
+            3,500,000.50
         """
 
         if value is None:
@@ -678,6 +950,9 @@ class PropertyNormalizer:
         if not value:
             return None
 
+        # Remove spaces used as numeric separators.
+        value = value.replace(" ", "")
+
         # Remove thousands separators.
         if "," in value and "." in value:
             # Example: 3,500,000.50
@@ -686,23 +961,21 @@ class PropertyNormalizer:
         elif "," in value:
             parts = value.split(",")
 
-            # 3,500,000 -> thousands separators
-            if all(
+            # Example: 3,500,000
+            if len(parts) > 1 and all(
                 len(part) == 3
                 for part in parts[1:]
             ):
                 value = "".join(parts)
 
-            # 150,5 -> decimal separator
+            # Example: 150,5
             else:
                 value = value.replace(",", ".")
+
+        if not re.fullmatch(r"[+-]?\d+(?:\.\d+)?", value):
+            return None
 
         try:
             return float(value)
         except ValueError:
-            logger.warning(
-                "Could not convert value to float: %s",
-                value,
-            )
             return None
-
