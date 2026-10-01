@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from app.graph.state import ConversationState
+from app.agents.state import ConversationState
 
 
 SalesIntent = Literal[

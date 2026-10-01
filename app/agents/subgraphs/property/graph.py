@@ -6,6 +6,7 @@ from .state import PropertyState
 from .state import (
     rewrite_query,
     retrieve_properties,
+    select_property,
     generate_property_response,
 )
 
@@ -31,6 +32,11 @@ def build_property_graph():
     )
 
     builder.add_node(
+        "select_property",
+        select_property,
+    )
+
+    builder.add_node(
         "generate_property_response",
         generate_property_response,
     )
@@ -38,7 +44,8 @@ def build_property_graph():
     builder.add_edge(START, "extract_requirements")
     builder.add_edge("extract_requirements", "rewrite_query")
     builder.add_edge("rewrite_query", "retrieve_properties")
-    builder.add_edge("retrieve_properties", "generate_property_response")
+    builder.add_edge("retrieve_properties", "select_property")
+    builder.add_edge("select_property", "generate_property_response")
     builder.add_edge("generate_property_response", END)
     
 

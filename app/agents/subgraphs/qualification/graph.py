@@ -5,9 +5,8 @@ from langgraph.graph import START, END, StateGraph
 from .state import QualificationState
 
 from .state import (
-    analyze_lead,
-    qualify_lead,
-    prepare_crm,
+    ask_question,
+    check_qualification,
 )
 
 
@@ -18,39 +17,30 @@ def build_qualification_graph():
     )
 
     builder.add_node(
-        "analyze_lead",
-        analyze_lead,
+        "check_qualification",
+        check_qualification,
     )
 
     builder.add_node(
-        "qualify",
-        qualify_lead,
-    )
-
-    builder.add_node(
-        "prepare_crm",
-        prepare_crm,
+        "ask_question",
+        ask_question,
     )
 
     builder.add_edge(
         START,
-        "analyze_lead",
+        "check_qualification",
     )
 
-    builder.add_edge(
-        "analyze_lead",
-        "qualify",
+    builder.add_conditional_edges(
+        "check_qualification",
+        lambda state: "complete" if state.get("qualification_complete") else "ask_question",
+        {
+            "complete": END,
+            "ask_question": "ask_question",
+        },
     )
 
-    builder.add_edge(
-        "qualify",
-        "prepare_crm",
-    )
-
-    builder.add_edge(
-        "prepare_crm",
-        END,
-    )
+    builder.add_edge("ask_question", END)
 
     return builder.compile()
 

@@ -75,7 +75,7 @@ def router (state: ConversationState) -> dict:
     """
 
     return {
-        "intent": "poperty_search"
+        "intent": "property_search"
     }
 
 def route_agent(state: ConversationState) -> str:

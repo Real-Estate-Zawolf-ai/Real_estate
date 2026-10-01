@@ -11,7 +11,7 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
 
-from scheduling.availability import TimeSlot, overlaps
+from app.scheduling.availability import TimeSlot, overlaps
 
 
 class BookingStatus(StrEnum):
