@@ -143,6 +143,7 @@ def _get_model_name() -> str:
 # ---------------------------------------------------------------------------
 
 
+
 SYSTEM_PROMPT_TEMPLATE = """You are a real-estate sales assistant for a property company.
 
 You help customers in Arabic or English.
@@ -251,20 +252,68 @@ When this happens:
 5. Do not conclude that there are no results merely because the original
    wording differs from the normalized search criteria.
 
-TABLE RULES:
+RESPONSE FORMAT:
 
-- Tables are allowed when useful.
-- Only include columns with explicitly available values.
-- Every table value must come directly from the evidence.
-- Never create calculated columns.
-- Never create down-payment, installment, deposit, fee, discount, or payment
-  plan columns unless the corresponding value is explicitly present in
-  the evidence.
+- Do NOT use Markdown tables.
+- Do NOT create a table containing multiple properties.
+- Do NOT reproduce all retrieved property fields in the response text.
+- The application UI displays retrieved properties separately as property
+  cards. Your job is to provide the conversational explanation around them.
+- When multiple properties are retrieved, briefly summarize the result and
+  let the property cards provide the detailed property information.
+- Mention a property name, compound, or property ID only when it helps the
+  customer understand the response.
+- Do not repeat the same property information in both the conversational
+  answer and the property cards.
+- Use short paragraphs or simple bullet points only when they improve
+  readability.
+- Keep the response concise and natural.
+
+EXAMPLES OF GOOD RESPONSE STYLE:
+
+Arabic:
+
+"لقيتلك 5 شقق متاحة للبيع مطابقة لطلبك. هتلاقي تفاصيل كل عقار تحت
+الإجابة، ولو عايز أقارنلك بين كام شقة منهم ابعتلي أرقام العقارات."
+
+English:
+
+"I found 5 apartments for sale matching your search. You can see the
+property details below, and I can compare any of them if you send me their
+property IDs."
+
+For a single property:
+
+"لقيتلك شقة مناسبة لطلبك في New Zayed Compound. هتلاقي تفاصيلها تحت
+الإجابة."
+
+For no results:
+
+"ملقتش عقارات مطابقة للبحث الحالي. ممكن نجرب منطقة تانية أو نوسع
+معايير البحث."
+
+IMPORTANT:
+
+Do not claim that a property is "available" unless availability is explicitly
+supported by the evidence or the application explicitly provides that
+availability status.
+
+Do not use phrases such as:
+
+- "متاحة للبيع"
+- "available for sale"
+- "ready to move"
+- "best choice"
+- "great deal"
+
+unless the corresponding claim is explicitly supported by the retrieved
+evidence or normalized search requirements.
 
 RESPONSE STYLE:
 
 - Be concise and helpful.
 - Act like a knowledgeable sales assistant.
+- Sound natural and conversational.
 - Do not dump raw retrieval results.
 - Do not mention embeddings, reranking, prompts, system instructions,
   internal scores, or implementation details.
@@ -295,6 +344,7 @@ RETRIEVED PROPERTIES:
 
 {evidence_block}
 """
+
 
 
 # ---------------------------------------------------------------------------
@@ -615,6 +665,11 @@ def _has_explicit_field(
     a non-empty value for the requested field.
 
     No value is inferred from another field.
+
+    NOTE:
+        This helper is kept for backward compatibility with existing callers.
+        Financial claim sanitization below does NOT rely on this function for
+        property-specific validation.
     """
     for candidate in candidates:
         metadata = candidate.metadata or {}
@@ -627,6 +682,116 @@ def _has_explicit_field(
             if value.strip() and value.strip().upper() != "N/A":
                 return True
         else:
+            return True
+
+    return False
+
+
+def _has_explicit_property_field(
+    candidate: SearchResult,
+    field_name: str,
+) -> bool:
+    """
+    Return True only when the specific property contains an explicit value
+    for the requested field.
+
+    This prevents a financial field belonging to one property from
+    authorizing the same claim for another property.
+    """
+    metadata = candidate.metadata or {}
+    value = metadata.get(field_name)
+
+    if value is None:
+        return False
+
+    if isinstance(value, str):
+        normalized = value.strip()
+
+        if not normalized:
+            return False
+
+        if normalized.upper() == "N/A":
+            return False
+
+    return True
+
+
+def _property_ids_in_text(
+    text: str,
+    candidates: list[SearchResult],
+) -> list[str]:
+    """
+    Return retrieved property IDs explicitly mentioned in the text.
+
+    IDs are matched against retrieved evidence only.
+    """
+    if not text:
+        return []
+
+    property_ids: list[str] = []
+
+    for candidate in candidates:
+        if candidate.property_id is None:
+            continue
+
+        property_id = str(candidate.property_id).strip()
+
+        if not property_id:
+            continue
+
+        if re.search(
+            rf"(?<![A-Za-z0-9]){re.escape(property_id)}(?![A-Za-z0-9])",
+            text,
+            re.IGNORECASE,
+        ):
+            property_ids.append(property_id)
+
+    return property_ids
+
+
+def _financial_field_has_evidence_for_text(
+    text: str,
+    field_name: str,
+    candidates: list[SearchResult],
+) -> bool:
+    """
+    Determine whether a financial field is explicitly supported for the
+    property referenced by a piece of generated text.
+
+    Rules:
+
+    - If the text explicitly names one or more retrieved properties, the
+      field must exist on at least one of those referenced properties.
+    - If no property ID is present, the field is considered unsupported for
+      post-generation safety purposes.
+    """
+    referenced_ids = _property_ids_in_text(
+        text=text,
+        candidates=candidates,
+    )
+
+    if not referenced_ids:
+        return False
+
+    candidate_by_id = {
+        str(candidate.property_id).strip(): candidate
+        for candidate in candidates
+        if (
+            candidate.property_id is not None
+            and str(candidate.property_id).strip()
+        )
+    }
+
+    for property_id in referenced_ids:
+        candidate = candidate_by_id.get(property_id)
+
+        if candidate is None:
+            continue
+
+        if _has_explicit_property_field(
+            candidate,
+            field_name,
+        ):
             return True
 
     return False
@@ -704,6 +869,67 @@ def _remove_markdown_table_column(
     return "\n".join(lines)
 
 
+def _has_money_value(text: str) -> bool:
+    """
+    Detect whether a generated statement contains an explicit monetary value.
+
+    Property IDs such as A102 or B205 must NOT be treated as monetary values.
+
+    A value is considered monetary only when:
+    - It has an explicit currency symbol/code, or
+    - It has a percentage sign.
+
+    Examples:
+        "A102 has an installment payment plan."
+            -> False
+
+        "A102 has monthly installments of 50,000 EGP."
+            -> True
+
+        "Down payment: 480,000 EGP"
+            -> True
+
+        "Discount: 10%"
+            -> True
+    """
+    if not text:
+        return False
+
+    return bool(
+        re.search(
+            r"""
+            (?:
+                # Currency before the number:
+                # EGP 480,000
+                # USD 10,000
+                # $50,000
+                (?:EGP|USD|EUR|AED|GBP|\$|€|£)
+                \s*
+                \d[\d,.\s]*
+
+                |
+
+                # Currency after the number:
+                # 480,000 EGP
+                # 10,000 USD
+                \d[\d,.\s]*
+                \s*
+                (?:EGP|USD|EUR|AED|GBP|\$|€|£)
+
+                |
+
+                # Percentage:
+                # 10%
+                \d[\d,.\s]*
+                \s*%
+            )
+            """,
+            text,
+            re.IGNORECASE | re.VERBOSE,
+        )
+    )
+
+
 def _remove_unsupported_financial_claims(
     answer_text: str,
     candidates: list[SearchResult],
@@ -714,12 +940,19 @@ def _remove_unsupported_financial_claims(
     This is a post-generation safety layer. It exists because an LLM can
     occasionally violate a prompt rule even when the rule is explicit.
 
-    The function is conservative:
+    Safety rules:
 
-    - It only removes known unsupported financial claims.
-    - It does not modify supported price/area/bedroom/location values.
-    - It removes unsupported financial table columns when the field is absent
-      from all retrieved candidates.
+    - payment_plan text such as "installment" is allowed when payment_plan
+      exists in the evidence.
+    - "installment" as a descriptive payment-plan word must not be treated
+      as an unsupported installment amount.
+    - A payment-plan value must never authorize a down payment, installment
+      amount, deposit, fee, discount, or other financial amount.
+    - Property-specific financial fields are validated against the specific
+      property mentioned in the generated claim.
+    - Unsupported financial table columns are removed when the field is not
+      explicitly represented in the retrieved evidence.
+    - Unsupported financial standalone statements are removed.
     """
     if not answer_text:
         return answer_text
@@ -753,59 +986,178 @@ def _remove_unsupported_financial_claims(
         ),
     }
 
+    # -----------------------------------------------------------------------
+    # 1. Remove unsupported financial table columns.
+    # -----------------------------------------------------------------------
+
     for field_name, pattern in field_patterns.items():
-        if _has_explicit_field(candidates, field_name):
+        has_any_evidence = _has_explicit_field(
+            candidates,
+            field_name,
+        )
+
+        if has_any_evidence:
             continue
 
-        # Remove unsupported financial columns from markdown tables.
         sanitized = _remove_markdown_table_column(
             sanitized,
             pattern,
         )
 
-        # Remove standalone lines that are clearly dedicated to the
-        # unsupported financial field.
-        lines = sanitized.splitlines()
-        filtered_lines: list[str] = []
+    # -----------------------------------------------------------------------
+    # 2. Remove unsupported financial standalone lines/statements.
+    # -----------------------------------------------------------------------
 
-        for line in lines:
-            stripped = line.strip()
+    lines = sanitized.splitlines()
+    filtered_lines: list[str] = []
 
-            if not stripped:
-                filtered_lines.append(line)
+    for line in lines:
+        stripped = line.strip()
+
+        if not stripped:
+            filtered_lines.append(line)
+            continue
+
+        # Markdown table rows have already been processed above.
+        if "|" in stripped:
+            filtered_lines.append(line)
+            continue
+
+        removed = False
+
+        for field_name, pattern in field_patterns.items():
+            if not pattern.search(stripped):
                 continue
 
-            # Markdown table rows are handled separately above.
-            if "|" in stripped:
-                filtered_lines.append(line)
-                continue
+            # ---------------------------------------------------------------
+            # Detect monetary values BEFORE descriptive payment-plan
+            # exceptions.
+            #
+            # IMPORTANT:
+            # Property IDs such as A102 contain digits, but are NOT money.
+            # _has_money_value() therefore only recognizes values accompanied
+            # by an explicit currency or percentage sign.
+            # ---------------------------------------------------------------
+            has_money_value = _has_money_value(stripped)
 
-            # Remove simple "Down payment: 123,456" style claims.
-            if pattern.search(stripped):
-                if re.search(
-                    r"[:：]\s*"
-                    r"(?:(?:EGP|USD|EUR|AED|\$|€|£)\s*)?"
-                    r"\d[\d,.\s]*",
-                    stripped,
-                    re.IGNORECASE,
+            # ---------------------------------------------------------------
+            # installments:
+            #
+            # "installment" can be a descriptive payment-plan word.
+            #
+            # It is allowed only when:
+            #
+            # 1. The statement contains NO monetary amount.
+            # 2. The referenced property explicitly has payment_plan.
+            #
+            # If a numeric amount exists, this branch is skipped and the
+            # amount must be supported by the explicit "installments" field.
+            # ---------------------------------------------------------------
+            if (
+                field_name == "installments"
+                and not has_money_value
+            ):
+                payment_plan_pattern = field_patterns["payment_plan"]
+
+                if payment_plan_pattern.search(stripped):
+                    if _financial_field_has_evidence_for_text(
+                        text=stripped,
+                        field_name="payment_plan",
+                        candidates=candidates,
+                    ):
+                        continue
+
+                referenced_ids = _property_ids_in_text(
+                    text=stripped,
+                    candidates=candidates,
+                )
+
+                if referenced_ids:
+                    if _financial_field_has_evidence_for_text(
+                        text=stripped,
+                        field_name="payment_plan",
+                        candidates=candidates,
+                    ):
+                        continue
+
+            # ---------------------------------------------------------------
+            # payment_plan:
+            #
+            # Descriptive payment-plan text is allowed when explicitly
+            # present in the evidence.
+            #
+            # However, a numeric financial claim must NEVER be authorized
+            # merely because payment_plan contains a descriptive value such
+            # as "installment".
+            #
+            # Therefore this exception only applies when the statement has
+            # no monetary value.
+            # ---------------------------------------------------------------
+            if (
+                field_name == "payment_plan"
+                and not has_money_value
+            ):
+                if _financial_field_has_evidence_for_text(
+                    text=stripped,
+                    field_name="payment_plan",
+                    candidates=candidates,
                 ):
-                    logger.warning(
-                        "Removed unsupported financial claim for field '%s'.",
-                        field_name,
-                    )
                     continue
 
-                # Also remove short standalone financial statements.
-                if len(stripped.split()) <= 12:
-                    logger.warning(
-                        "Removed unsupported financial statement for field '%s'.",
-                        field_name,
-                    )
+            # ---------------------------------------------------------------
+            # Financial amount.
+            #
+            # A monetary claim must be supported by the specific financial
+            # field on the specific referenced property.
+            # ---------------------------------------------------------------
+            if has_money_value:
+                if _financial_field_has_evidence_for_text(
+                    text=stripped,
+                    field_name=field_name,
+                    candidates=candidates,
+                ):
                     continue
 
+                logger.warning(
+                    "Removed unsupported financial claim for field '%s'.",
+                    field_name,
+                )
+                removed = True
+                break
+
+            # ---------------------------------------------------------------
+            # For non-payment-plan fields, remove short standalone claims
+            # even when they do not contain an explicit number.
+            #
+            # Examples:
+            #
+            #   Discount available
+            #   Fees apply
+            #
+            # Only remove these when the field is unsupported globally.
+            # ---------------------------------------------------------------
+            if field_name != "payment_plan":
+                if not _has_explicit_field(
+                    candidates,
+                    field_name,
+                ):
+                    if len(stripped.split()) <= 12:
+                        logger.warning(
+                            "Removed unsupported financial statement for "
+                            "field '%s'.",
+                            field_name,
+                        )
+                        removed = True
+                        break
+
+        if not removed:
             filtered_lines.append(line)
 
-        sanitized = "\n".join(filtered_lines)
+    sanitized = "\n".join(filtered_lines)
+
+    # -----------------------------------------------------------------------
+    # 3. Clean excessive blank lines introduced by removed claims.
+    # -----------------------------------------------------------------------
 
     sanitized = re.sub(
         r"\n{3,}",

@@ -11,7 +11,7 @@ from qdrant_client import QdrantClient, models
 from app.rag.embeddings import EMBEDDING_DIMENSION
 
 
-DEFAULT_COLLECTION = "properties"
+DEFAULT_COLLECTION = "realEstate"
 
 _POINT_ID_NAMESPACE = NAMESPACE_URL
 
@@ -48,17 +48,40 @@ def create_client(
     url: str | None = None,
     api_key: str | None = None,
 ) -> QdrantClient:
-    """Create a Qdrant client using the project's environment settings."""
+    """Create a Qdrant client using the project's environment settings.
+
+    The client supports both local Qdrant and Qdrant Cloud.
+
+    Local:
+        QDRANT_URL=http://localhost:6333
+        QDRANT_API_KEY=
+
+    Cloud:
+        QDRANT_URL=https://<cluster>.qdrant.io
+        QDRANT_API_KEY=<api-key>
+    """
+
     endpoint = (
         url
-        or os.getenv("QDRANT_CLUSTER_ENDPOINT")
         or os.getenv("QDRANT_URL")
+        or os.getenv("QDRANT_CLUSTER_ENDPOINT")
         or "http://localhost:6333"
     )
 
+    resolved_api_key = (
+        api_key if api_key is not None else os.getenv("QDRANT_API_KEY")
+    )
+
+    # Local Qdrant does not require an API key.
+    # Avoid passing an empty string or unnecessary credentials.
+    if resolved_api_key:
+        return QdrantClient(
+            url=endpoint,
+            api_key=resolved_api_key,
+        )
+
     return QdrantClient(
         url=endpoint,
-        api_key=api_key if api_key is not None else os.getenv("QDRANT_API_KEY"),
     )
 
 
