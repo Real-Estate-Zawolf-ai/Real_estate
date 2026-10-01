@@ -1,6 +1,6 @@
 from langgraph.graph import StateGraph, START, END
 
-from app.graph.state import ConversationState
+from app.agents.state import ConversationState
 
 from .subgraphs.conversational.graph import conversational_graph
 from .subgraphs.property.graph import property_graph

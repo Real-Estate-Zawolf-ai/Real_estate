@@ -1,6 +1,6 @@
 from typing_extensions import TypedDict
 
-from app.graph.state import ConversationState
+from app.agents.state import ConversationState
 
 
 class QualificationState(

@@ -1,4 +1,5 @@
-from app.graph.state import ConversationState
+from app.agents.state import ConversationState
+from app.agents.tools.scheduling import scheduling_service
 
 
 class SchedulingState(
@@ -15,13 +16,11 @@ class SchedulingState(
 
     selected_slot: dict | None
 
-def check_availability(
-    state: SchedulingState,scheduling_service
-) -> dict:
+def check_availability(state: SchedulingState) -> dict:
 
     slots = scheduling_service.get_available_slots(
-        date=state.get("requested_date"),
-    )
+        date=state.get("requested_date", ""),
+    ) or []
 
     return {
         "available_slots": slots,
@@ -46,7 +45,6 @@ def select_slot(
 
 def book_appointment(
     state: SchedulingState,
-    scheduling_service,
 ) -> dict:
 
     slot = state.get("selected_slot")
@@ -57,7 +55,7 @@ def book_appointment(
         }
 
     appointment = scheduling_service.book(
-        customer_id="customer_123",
+        customer_id=state.get("customer_id", ""),
         slot=slot,
     )
 

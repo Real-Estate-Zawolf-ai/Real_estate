@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from app.graph.state import ConversationState
-from app.tools.property import property_search_service
+from typing import Any
+
+from app.agents.state import ConversationState
+from app.agents.tools.property import property_search_service
 
 
 class PropertyState(
@@ -41,7 +43,7 @@ class PropertyState(
 
 def extract_requirements(
     state: PropertyState,
-    property_llm,
+    property_llm: Any | None = None,
 ) -> dict:
     """
     Extract structured property requirements
@@ -50,9 +52,10 @@ def extract_requirements(
 
     query = state.get("query", "")
 
-    requirements = property_llm.extract_requirements(
-        query=query,
-    )
+    if property_llm is None:
+        return {"requirements": state.get("requirements", {})}
+
+    requirements = property_llm.extract_requirements(query=query)
 
     return {
         "requirements": requirements,
@@ -61,7 +64,7 @@ def extract_requirements(
 
 def rewrite_query(
     state: PropertyState,
-    property_llm,
+    property_llm: Any | None = None,
 ) -> dict:
     """
     Rewrite the user's query into a retrieval-friendly query.
@@ -74,10 +77,10 @@ def rewrite_query(
         {},
     )
 
-    rewritten_query = property_llm.rewrite_query(
-        query=query,
-        requirements=requirements,
-    )
+    if property_llm is None:
+        return {"rewritten_query": query}
+
+    rewritten_query = property_llm.rewrite_query(query=query, requirements=requirements)
 
     return {
         "rewritten_query": rewritten_query,
@@ -114,7 +117,7 @@ def retrieve_properties(
 
 def select_property(
     state: PropertyState,
-    property_llm,
+    property_llm: Any | None = None,
 ) -> dict:
     """
     Select the most relevant property from
@@ -131,12 +134,12 @@ def select_property(
             "selected_property": None,
         }
 
+    if property_llm is None:
+        return {"selected_property": candidates[0]}
+
     selected_property = property_llm.select_property(
         candidates=candidates,
-        requirements=state.get(
-            "requirements",
-            {},
-        ),
+        requirements=state.get("requirements", {}),
     )
 
     return {
@@ -146,7 +149,7 @@ def select_property(
 
 def generate_property_response(
     state: PropertyState,
-    property_llm,
+    property_llm: Any | None = None,
 ) -> dict:
     """
     Generate the final grounded response.
@@ -161,12 +164,12 @@ def generate_property_response(
             "response": "No suitable property found."
         }
 
+    if property_llm is None:
+        return {"response": "A matching property was found."}
+
     response = property_llm.generate_response(
         selected_property=selected_property,
-        requirements=state.get(
-            "requirements",
-            {},
-        ),
+        requirements=state.get("requirements", {}),
     )
 
     return {

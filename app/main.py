@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
-from api.routes import voice_router, webhooks_router
+from app.api.routes import voice_router, webhooks_router
 
 
 app = FastAPI(
