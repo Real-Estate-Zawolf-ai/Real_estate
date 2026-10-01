@@ -63,9 +63,9 @@ class Settings(BaseSettings):
     # -----------------------------------------------------------------------
 
     QDRANT_CLUSTER_ENDPOINT: str | None = None
-    QDRANT_URL: str | None = None
+    QDRANT_URL: str = "http://localhost:6333"
     QDRANT_API_KEY: str | None = None
-    QDRANT_COLLECTION: str = "properties"
+    QDRANT_COLLECTION: str = "realEstate"
 
     # -----------------------------------------------------------------------
     # Other retrieval / AI providers

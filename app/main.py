@@ -8,9 +8,8 @@ Run locally with:
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
-from typing import Any, Dict, List, Union
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,7 +18,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .api.routes import voice_router, webhooks_router
-from .database.vector_db import DEFAULT_COLLECTION, create_client
+from .database.vector_db import create_client
+from .helpers.config import get_settings
 from .rag.generation import generate_response
 from .rag.retrieval.hybrid_search import hybrid_search
 from .rag.retrieval.metadata_filter import build_metadata_filter
@@ -36,16 +36,21 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Real Estate Assistant API",
     version="0.1.0",
-    description="API for the real-estate assistant.",
+    description=(
+        "API for the AI Real Estate Assistant. "
+        "Provides grounded property search and response generation."
+    ),
 )
 
 
 # ---------------------------------------------------------------------------
 # CORS
 # ---------------------------------------------------------------------------
+#
+# Keep browser clients usable during development.
+# Restrict allow_origins before production deployment.
+# ---------------------------------------------------------------------------
 
-# Keep browser clients usable during early development.
-# Restrict this list to the deployed frontend origins before production.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -81,46 +86,77 @@ if FRONTEND_DIR.exists():
 # Request schema
 # ---------------------------------------------------------------------------
 
-RequirementValue = Union[
-    str,
-    int,
-    float,
-    bool,
-    List[str],
-    None,
-]
+RequirementValue = (
+    str
+    | int
+    | float
+    | bool
+    | list[str]
+    | None
+)
 
 
 class RAGRequest(BaseModel):
-    """Customer query and extracted property requirements."""
+    """Customer query and normalized property requirements."""
 
     query: str = Field(
+        ...,
         min_length=1,
         max_length=2000,
+        description="Original customer property-search query.",
     )
 
-    requirements: Dict[str, RequirementValue] = Field(
+    requirements: dict[str, RequirementValue] = Field(
         default_factory=dict,
+        description=(
+            "Normalized search requirements used by the retrieval pipeline."
+        ),
     )
 
-    # Number of final properties returned to the customer / LLM.
     top_k: int = Field(
         default=5,
         ge=1,
         le=20,
+        description="Number of final properties returned.",
     )
 
-    # Number of candidates retrieved before reranking.
     retrieval_top_k: int = Field(
         default=20,
         ge=1,
         le=100,
+        description="Number of candidates retrieved before reranking.",
     )
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _close_qdrant_client(client: Any) -> None:
+    """Safely close a Qdrant client when supported."""
+
+    if client is None:
+        return
+
+    close = getattr(client, "close", None)
+
+    if not callable(close):
+        return
+
+    try:
+        close()
+    except Exception:
+        logger.warning(
+            "Failed to close Qdrant client cleanly.",
+            exc_info=True,
+        )
 
 
 # ---------------------------------------------------------------------------
 # RAG endpoint
 # ---------------------------------------------------------------------------
+
 
 @app.post("/rag/search", tags=["rag"])
 async def rag_search(request: RAGRequest) -> dict[str, Any]:
@@ -131,20 +167,22 @@ async def rag_search(request: RAGRequest) -> dict[str, Any]:
 
         Customer Query
             ↓
-        Requirements
+        Normalized Requirements
             ↓
         Metadata Filter
             ↓
-        Dense / Hybrid Retrieval
-            ↓
-        Top-N Candidates
+        Hybrid Retrieval
             ↓
         Cross-Encoder Reranking
             ↓
-        Final Top-K
-            ↓
         Grounded Generation
+            ↓
+        Customer Response
     """
+
+    # -----------------------------------------------------------------------
+    # 1. Validate query
+    # -----------------------------------------------------------------------
 
     query = request.query.strip()
 
@@ -154,34 +192,47 @@ async def rag_search(request: RAGRequest) -> dict[str, Any]:
             detail="Query cannot be blank",
         )
 
+    logger.info(
+        "RAG request received | query=%r | top_k=%d | retrieval_top_k=%d",
+        query,
+        request.top_k,
+        request.retrieval_top_k,
+    )
+
     # -----------------------------------------------------------------------
-    # Metadata filter
+    # 2. Build metadata filter
     # -----------------------------------------------------------------------
 
     try:
         requirements_filter = build_metadata_filter(
             request.requirements,
         )
+
     except (TypeError, ValueError) as error:
         logger.warning(
-            "Invalid property requirements: %s",
+            "Invalid property requirements | error=%s",
             error,
         )
+
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Invalid property requirements",
         ) from error
 
     # -----------------------------------------------------------------------
-    # Retrieval
+    # 3. Hybrid retrieval
     # -----------------------------------------------------------------------
 
-    qdrant_client = None
+    qdrant_client: Any = None
+    candidates = []
 
     try:
-        collection_name = os.getenv(
-            "QDRANT_COLLECTION",
-            DEFAULT_COLLECTION,
+        settings = get_settings()
+        collection_name = settings.QDRANT_COLLECTION
+
+        logger.debug(
+            "Using Qdrant collection: %s",
+            collection_name,
         )
 
         qdrant_client = create_client()
@@ -195,8 +246,10 @@ async def rag_search(request: RAGRequest) -> dict[str, Any]:
         )
 
         logger.info(
-            "Property retrieval completed | query=%r | candidates=%d",
+            "Property retrieval completed | "
+            "query=%r | collection=%s | candidates=%d",
             query,
+            collection_name,
             len(candidates),
         )
 
@@ -212,11 +265,10 @@ async def rag_search(request: RAGRequest) -> dict[str, Any]:
         ) from error
 
     finally:
-        if qdrant_client is not None:
-            qdrant_client.close()
+        _close_qdrant_client(qdrant_client)
 
     # -----------------------------------------------------------------------
-    # Reranking
+    # 4. Reranking
     # -----------------------------------------------------------------------
 
     try:
@@ -227,7 +279,8 @@ async def rag_search(request: RAGRequest) -> dict[str, Any]:
         )
 
         logger.info(
-            "Property reranking completed | candidates=%d | final=%d",
+            "Property reranking completed | "
+            "retrieved=%d | final=%d",
             len(candidates),
             len(reranked_candidates),
         )
@@ -244,18 +297,19 @@ async def rag_search(request: RAGRequest) -> dict[str, Any]:
         ) from error
 
     # -----------------------------------------------------------------------
-    # Generation
+    # 5. Grounded generation
     # -----------------------------------------------------------------------
 
     try:
         result = generate_response(
-                customer_query=query,
-                candidates=reranked_candidates,
-                requirements=request.requirements,
-                )
+            customer_query=query,
+            candidates=reranked_candidates,
+            requirements=request.requirements,
+        )
 
         logger.info(
-            "Response generation completed | cited=%d | grounded=%d",
+            "Response generation completed | "
+            "cited=%d | grounded=%d",
             len(result.cited_property_ids),
             len(result.grounding_property_ids),
         )
@@ -272,29 +326,32 @@ async def rag_search(request: RAGRequest) -> dict[str, Any]:
         ) from error
 
     # -----------------------------------------------------------------------
-    # Response
+    # 6. Response serialization
     # -----------------------------------------------------------------------
+
+    properties = [
+        {
+            "property_id": candidate.property_id,
+            "text": candidate.text,
+            "metadata": candidate.metadata,
+            "source_file": candidate.source_file,
+            "score": candidate.combined_score,
+        }
+        for candidate in reranked_candidates
+    ]
 
     return {
         "answer": result.answer_text,
         "cited_property_ids": result.cited_property_ids,
         "grounding_property_ids": result.grounding_property_ids,
-        "properties": [
-            {
-                "property_id": candidate.property_id,
-                "text": candidate.text,
-                "metadata": candidate.metadata,
-                "source_file": candidate.source_file,
-                "score": candidate.combined_score,
-            }
-            for candidate in reranked_candidates
-        ],
+        "properties": properties,
     }
 
 
 # ---------------------------------------------------------------------------
 # Frontend route
 # ---------------------------------------------------------------------------
+
 
 @app.get("/", include_in_schema=False)
 async def website() -> FileResponse:
@@ -315,9 +372,10 @@ async def website() -> FileResponse:
 # Health check
 # ---------------------------------------------------------------------------
 
+
 @app.get("/health", tags=["system"])
 async def health() -> dict[str, str]:
-    """Return basic API information."""
+    """Return basic API health information."""
 
     return {
         "name": app.title,

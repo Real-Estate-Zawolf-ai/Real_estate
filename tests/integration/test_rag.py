@@ -123,3 +123,8 @@ def test_rag_handles_no_matching_properties_without_citing_any(monkeypatch):
     assert "no properties retrieved" in fake_client.chat.completions.create.call_args.kwargs[
         "messages"
     ][0]["content"]
+
+
+
+
+
