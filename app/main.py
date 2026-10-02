@@ -8,7 +8,6 @@ Run locally with:
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 from typing import Any, Dict, List, Union
 
@@ -18,12 +17,18 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .api.routes import voice_router, webhooks_router
-from .database.vector_db import DEFAULT_COLLECTION, create_client
-from .rag.generation import generate_response
-from .rag.retrieval.hybrid_search import hybrid_search
-from .rag.retrieval.metadata_filter import build_metadata_filter
-from .rag.retrieval.reranker import rerank
+from .api.routes import (
+    chat_router,
+    documents_router,
+    leads_router,
+    properties_router,
+    voice_router,
+    webhooks_router,
+)
+from starlette.concurrency import run_in_threadpool
+
+from .database.vector_db import create_client
+from .workflows.rag import answer_query
 
 
 logger = logging.getLogger(__name__)
@@ -61,6 +66,10 @@ app.add_middleware(
 
 app.include_router(voice_router)
 app.include_router(webhooks_router)
+app.include_router(chat_router)
+app.include_router(properties_router)
+app.include_router(documents_router)
+app.include_router(leads_router)
 
 
 # ---------------------------------------------------------------------------
@@ -146,150 +155,19 @@ async def rag_search(request: RAGRequest) -> dict[str, Any]:
         Grounded Generation
     """
 
-    query = request.query.strip()
-
-    if not query:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Query cannot be blank",
-        )
-
-    # -----------------------------------------------------------------------
-    # Metadata filter
-    # -----------------------------------------------------------------------
-
     try:
-        requirements_filter = build_metadata_filter(
+        return await run_in_threadpool(
+            answer_query,
+            request.query,
             request.requirements,
-        )
-    except (TypeError, ValueError) as error:
-        logger.warning(
-            "Invalid property requirements: %s",
-            error,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Invalid property requirements",
-        ) from error
-
-    # -----------------------------------------------------------------------
-    # Retrieval
-    # -----------------------------------------------------------------------
-
-    qdrant_client = None
-
-    try:
-        collection_name = os.getenv(
-            "QDRANT_COLLECTION",
-            DEFAULT_COLLECTION,
-        )
-
-        qdrant_client = create_client()
-
-        candidates = hybrid_search(
-            query=query,
-            requirements_filter=requirements_filter,
-            collection_name=collection_name,
-            qdrant_client=qdrant_client,
-            top_k=request.retrieval_top_k,
-        )
-
-        logger.info(
-            "Property retrieval completed | query=%r | candidates=%d",
-            query,
-            len(candidates),
-        )
-
-    except Exception as error:
-        logger.exception(
-            "Property search failed | query=%r",
-            query,
-        )
-
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Property search is temporarily unavailable",
-        ) from error
-
-    finally:
-        if qdrant_client is not None:
-            qdrant_client.close()
-
-    # -----------------------------------------------------------------------
-    # Reranking
-    # -----------------------------------------------------------------------
-
-    try:
-        reranked_candidates = rerank(
-            query=query,
-            candidates=candidates,
             top_k=request.top_k,
+            retrieval_top_k=request.retrieval_top_k,
         )
-
-        logger.info(
-            "Property reranking completed | candidates=%d | final=%d",
-            len(candidates),
-            len(reranked_candidates),
-        )
-
     except Exception as error:
-        logger.exception(
-            "Property reranking failed | query=%r",
-            query,
-        )
-
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Property reranking is temporarily unavailable",
+            detail="RAG workflow is unavailable",
         ) from error
-
-    # -----------------------------------------------------------------------
-    # Generation
-    # -----------------------------------------------------------------------
-
-    try:
-        result = generate_response(
-                customer_query=query,
-                candidates=reranked_candidates,
-                requirements=request.requirements,
-                )
-
-        logger.info(
-            "Response generation completed | cited=%d | grounded=%d",
-            len(result.cited_property_ids),
-            len(result.grounding_property_ids),
-        )
-
-    except Exception as error:
-        logger.exception(
-            "Response generation failed | query=%r",
-            query,
-        )
-
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Could not generate a response",
-        ) from error
-
-    # -----------------------------------------------------------------------
-    # Response
-    # -----------------------------------------------------------------------
-
-    return {
-        "answer": result.answer_text,
-        "cited_property_ids": result.cited_property_ids,
-        "grounding_property_ids": result.grounding_property_ids,
-        "properties": [
-            {
-                "property_id": candidate.property_id,
-                "text": candidate.text,
-                "metadata": candidate.metadata,
-                "source_file": candidate.source_file,
-                "score": candidate.combined_score,
-            }
-            for candidate in reranked_candidates
-        ],
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -324,3 +202,20 @@ async def health() -> dict[str, str]:
         "version": app.version,
         "docs": "/docs",
     }
+
+
+@app.get("/health/ready", tags=["system"])
+async def readiness() -> dict[str, Any]:
+    """Verify that the vector database required by the RAG workflow is reachable."""
+    client = create_client()
+    try:
+        collections = await run_in_threadpool(client.get_collections)
+        return {
+            "status": "ready",
+            "qdrant": "reachable",
+            "collections": [item.name for item in collections.collections],
+        }
+    except Exception as error:
+        raise HTTPException(status_code=503, detail="Qdrant is unavailable") from error
+    finally:
+        client.close()

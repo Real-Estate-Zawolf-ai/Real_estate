@@ -1,6 +1,6 @@
 from langgraph.graph import StateGraph, START, END
 
-from app.agents.conversational.state import ConversationalState
+from app.agents.subgraphs.conversational.state import ConversationalState
 
 
 def generate_response(

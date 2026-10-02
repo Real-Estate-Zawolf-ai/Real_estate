@@ -620,26 +620,12 @@ def ingest_file(
     # ========================================================
 
     if source_type == "image":
-        logger.info(
-            "Image loaded successfully | file=%s",
-            file_path,
-        )
+        from app.rag.ocr.extractor import OCRExtractor
+        from app.rag.ocr.post_processor import OCRPostProcessor
 
-        return {
-            "status": "image_loaded",
-            "file": str(path),
-            "file_type": source_type,
-            "property_id": property_id,
-            "chunks": [],
-            "chunks_count": 0,
-            "metadata": document_metadata,
-            "content": raw_content,
-            "message": (
-                "Image loaded successfully. "
-                "OCR/CV processing is required before "
-                "text chunking and property normalization."
-            ),
-        }
+        extracted_text = OCRExtractor().extract_from_image(path)
+        raw_content = OCRPostProcessor().process(extracted_text).text
+        document_metadata["ocr_applied"] = True
 
     # ========================================================
     # SPREADSHEET FLOW

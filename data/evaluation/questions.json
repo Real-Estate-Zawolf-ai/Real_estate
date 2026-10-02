@@ -1,0 +1,11 @@
+[
+  {
+    "id": "q1",
+    "query": "Find a three-bedroom apartment in New Cairo under 5 million EGP",
+    "requirements": {
+      "location": "New Cairo",
+      "bedrooms": 3,
+      "max_price": 5000000
+    }
+  }
+]

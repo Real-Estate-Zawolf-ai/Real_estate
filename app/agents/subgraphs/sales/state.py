@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import Literal
 
-from app.graph.state import ConversationState
+from app.agents.state import ConversationState
+from app.agents.tools.crm import crm_service
 
 
 SalesIntent = Literal[
@@ -84,7 +85,6 @@ class SalesState(
 
 def understand_sales_intent(
     state: SalesState,
-    sales_llm,
 ) -> dict:
     """
     Understand the customer's current sales intent.
@@ -95,9 +95,17 @@ def understand_sales_intent(
         "",
     )
 
-    sales_intent = sales_llm.classify_intent(
-        query=query,
-    )
+    normalized = query.lower()
+    if any(word in normalized for word in ("payment", "installment", "تقسيط")):
+        sales_intent = "payment_inquiry"
+    elif any(word in normalized for word in ("price", "cost", "سعر")):
+        sales_intent = "price_inquiry"
+    elif any(word in normalized for word in ("offer", "discount", "عرض", "خصم")):
+        sales_intent = "offer_inquiry"
+    elif any(word in normalized for word in ("buy", "reserve", "شراء", "احجز")):
+        sales_intent = "purchase_intent"
+    else:
+        sales_intent = "sales_inquiry"
 
     return {
         "sales_intent": sales_intent,
@@ -106,7 +114,6 @@ def understand_sales_intent(
 
 def load_sales_context(
     state: SalesState,
-    crm_service,
 ) -> dict:
     """
     Load customer and sales context.
@@ -132,7 +139,6 @@ def load_sales_context(
 
 def handle_sales_request(
     state: SalesState,
-    sales_llm,
 ) -> dict:
     """
     Determine the appropriate sales action.
@@ -170,44 +176,16 @@ def handle_sales_request(
 
 def generate_sales_response(
     state: SalesState,
-    sales_llm,
 ) -> dict:
     """
     Generate a grounded sales response.
     """
 
-    response = sales_llm.generate_response(
-        query=state.get(
-            "query",
-            "",
-        ),
-        sales_intent=state.get(
-            "sales_intent",
-        ),
-        customer_profile=state.get(
-            "customer_profile",
-            {},
-        ),
-        selected_property=state.get(
-            "selected_property",
-        ),
-        sales_context=state.get(
-            "sales_context",
-            {},
-        ),
-        offer=state.get(
-            "offer",
-        ),
-        payment_plan=state.get(
-            "payment_plan",
-        ),
-        objection=state.get(
-            "objection",
-        ),
-        next_action=state.get(
-            "next_action",
-        ),
-    )
+    action = state.get("next_action", "continue_sales_conversation")
+    selected = state.get("selected_property") or {}
+    property_id = selected.get("property_id") or selected.get("id")
+    subject = f" for property {property_id}" if property_id else ""
+    response = f"I can help with {action.replace('_', ' ')}{subject}."
 
     return {
         "response": response,

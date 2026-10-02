@@ -1,4 +1,5 @@
 import pytest
+from importlib import import_module
 from unittest.mock import MagicMock, patch
 from app.rag.retrieval.hybrid_search import (
     hybrid_search,
@@ -7,6 +8,9 @@ from app.rag.retrieval.hybrid_search import (
     SearchResult
 )
 from app.rag.retrieval.metadata_filter import MetadataFilter
+
+
+hybrid_search_module = import_module("app.rag.retrieval.hybrid_search")
 
 def test_min_max_normalize():
     # Standard case
@@ -41,7 +45,7 @@ def test_hybrid_search_semantic_only():
         SearchResult(property_id="p2", chunk_id="c2", text="text2", metadata={}, semantic_score=0.7),
     ]
 
-    with patch("app.rag.retrieval.hybrid_search._qdrant_search", return_value=mock_results):
+    with patch.object(hybrid_search_module, "_qdrant_search", return_value=mock_results):
         # corpus_chunks=None triggers semantic-only path
         results = hybrid_search("query", filt, "coll", mock_client, corpus_chunks=None)
 
@@ -68,7 +72,7 @@ def test_hybrid_search_combined():
         {"chunk_id": "c3", "text": "Cairo luxury"}, # lexical hit only
     ]
 
-    with patch("app.rag.retrieval.hybrid_search._qdrant_search", return_value=semantic_results):
+    with patch.object(hybrid_search_module, "_qdrant_search", return_value=semantic_results):
         # Search for "Cairo"
         results = hybrid_search("Cairo", filt, "coll", mock_client, corpus_chunks=corpus)
 
