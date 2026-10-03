@@ -1,29 +1,20 @@
-"""Hybrid retrieval for the Real Estate RAG system.
+"""Hybrid retrieval for the real-estate RAG system.
 
-Pipeline:
+This module combines:
+- Metadata filtering
+- Dense vector search via Qdrant
+- Optional BM25 lexical retrieval
+- Score normalization
+- Weighted hybrid ranking
+- Query embeddings via shared EmbeddingModel
 
-    Metadata Filtering
-            ↓
-    Dense Vector Search (Qdrant)
-            +
-    Optional Lexical Search (BM25)
-            ↓
-    Score Normalization
-            ↓
-    Weighted Hybrid Ranking
-
-Important:
-
-    - Query embeddings are generated through the shared EmbeddingModel.
-    - The same embedding configuration must be used during indexing.
-    - Metadata filters are applied to both semantic and lexical retrieval.
-    - BM25 is optional and requires an explicitly supplied in-memory corpus.
-    - When no corpus is supplied, retrieval safely falls back to dense search.
-    - This module does not automatically load the full Qdrant collection
-      into memory.
+Design principles:
+- Query embeddings use the same EmbeddingModel used during indexing.
+- Metadata filters are applied to both semantic and lexical retrieval.
+- BM25 is optional and only runs when an explicit in-memory corpus is provided.
+- When no corpus is provided, retrieval degrades gracefully to semantic-only search.
+- The module does not automatically load the entire Qdrant collection into memory.
 """
-
-from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
@@ -35,14 +26,14 @@ from .metadata_filter import MetadataFilter, matches
 
 
 # ---------------------------------------------------------------------------
-# Embedding model
+# Shared embedding model
 # ---------------------------------------------------------------------------
 
 _embedding_model: EmbeddingModel | None = None
 
 
 def _get_embedding_model() -> EmbeddingModel:
-    """Lazily initialize and reuse the shared embedding model."""
+    """Return the shared embedding model instance."""
 
     global _embedding_model
 
@@ -53,7 +44,7 @@ def _get_embedding_model() -> EmbeddingModel:
 
 
 def embed_query(query: str) -> list[float]:
-    """Embed a search query using the shared EmbeddingModel."""
+    """Embed a user query using the shared embedding model."""
 
     if not isinstance(query, str) or not query.strip():
         raise ValueError("query must be a non-empty string")
@@ -68,7 +59,7 @@ def embed_query(query: str) -> list[float]:
 
 @dataclass
 class SearchResult:
-    """Normalized result returned by the retrieval layer."""
+    """Normalized retrieval result."""
 
     property_id: str | None
     chunk_id: str | None
@@ -88,53 +79,63 @@ class SearchResult:
 def _flatten_metadata(
     payload_or_chunk: dict[str, Any],
 ) -> dict[str, Any]:
-    """Return a normalized metadata dictionary.
+    """Flatten nested metadata while preserving top-level payload fields."""
 
-    Supports both:
+    nested_metadata = payload_or_chunk.get("metadata")
 
-        {
-            "metadata": {...},
-            "text": "...",
-            ...
-        }
+    if isinstance(nested_metadata, dict):
+        flattened = dict(nested_metadata)
+    else:
+        flattened = {}
 
-    and:
+    for key, value in payload_or_chunk.items():
+        if key != "metadata":
+            flattened[key] = value
 
-        {
-            "property_id": "...",
-            "price": ...,
-            "text": "...",
-            ...
-        }
+    return flattened
 
-    Top-level values take precedence over nested metadata values.
+
+def _get_source_file(
+    payload_or_chunk: dict[str, Any],
+    metadata: dict[str, Any],
+) -> str | None:
+    """Extract the best available source-file identifier.
+
+    Preference order:
+    1. source_file
+    2. file_name
+    3. source_path
+
+    ``source_file`` is the canonical SearchResult field.
+    ``file_name`` and ``source_path`` are common fields produced by
+    the ingestion layer and stored in Qdrant.
     """
 
-    metadata = payload_or_chunk.get("metadata", {})
+    source_file = payload_or_chunk.get("source_file")
 
-    if not isinstance(metadata, dict):
-        metadata = {}
+    if source_file is None:
+        source_file = metadata.get("source_file")
 
-    return {
-        **metadata,
-        **{
-            key: value
-            for key, value in payload_or_chunk.items()
-            if key != "metadata"
-        },
-    }
+    if source_file is None:
+        source_file = payload_or_chunk.get("file_name")
+
+    if source_file is None:
+        source_file = metadata.get("file_name")
+
+    if source_file is None:
+        source_file = payload_or_chunk.get("source_path")
+
+    if source_file is None:
+        source_file = metadata.get("source_path")
+
+    if source_file is None:
+        return None
+
+    return str(source_file)
 
 
-def _result_key(
-    result: SearchResult,
-    fallback_prefix: str,
-    index: int,
-) -> str:
-    """Build a stable merge key for semantic and lexical results.
-
-    Chunk ID is preferred because multiple chunks can belong to the same
-    property. Property ID is used only as a fallback.
-    """
+def _result_key(result: SearchResult) -> str:
+    """Return a stable key for merging semantic and lexical results."""
 
     if result.chunk_id:
         return str(result.chunk_id)
@@ -142,30 +143,28 @@ def _result_key(
     if result.property_id:
         return str(result.property_id)
 
-    return f"{fallback_prefix}-{index}"
+    return f"__synthetic__{id(result)}"
 
 
 # ---------------------------------------------------------------------------
-# Qdrant metadata filter
+# Qdrant filtering
 # ---------------------------------------------------------------------------
 
 
 def _to_qdrant_filter(
     requirements_filter: MetadataFilter | None,
 ) -> dict[str, Any] | None:
-    """Convert MetadataFilter into a Qdrant filter dictionary."""
+    """Convert MetadataFilter constraints to Qdrant filter syntax."""
 
-    if requirements_filter is None or requirements_filter.is_empty():
+    if requirements_filter is None:
         return None
 
-    must_conditions: list[dict[str, Any]] = []
+    conditions: list[dict[str, Any]] = []
 
-    # ------------------------------------------------------------------
-    # Equality constraints
-    # ------------------------------------------------------------------
-
+    # MetadataFilter uses ``equality`` as a list of EqualityConstraint
+    # objects, not an ``equalities`` dictionary.
     for constraint in requirements_filter.equality:
-        must_conditions.append(
+        conditions.append(
             {
                 "key": constraint.field,
                 "match": {
@@ -173,10 +172,6 @@ def _to_qdrant_filter(
                 },
             }
         )
-
-    # ------------------------------------------------------------------
-    # Range constraints
-    # ------------------------------------------------------------------
 
     for constraint in requirements_filter.ranges:
         range_condition: dict[str, Any] = {}
@@ -188,42 +183,40 @@ def _to_qdrant_filter(
             range_condition["lte"] = constraint.lte
 
         if range_condition:
-            must_conditions.append(
+            conditions.append(
                 {
                     "key": constraint.field,
                     "range": range_condition,
                 }
             )
 
-    if not must_conditions:
+    if not conditions:
         return None
 
-    return {
-        "must": must_conditions,
-    }
+    return {"must": conditions}
 
 
 # ---------------------------------------------------------------------------
-# Dense / semantic search
+# Qdrant semantic search
 # ---------------------------------------------------------------------------
 
 
 def _qdrant_search(
     query: str,
-    filt: MetadataFilter | None,
+    requirements_filter: MetadataFilter | None,
     collection_name: str,
     qdrant_client: Any,
-    top_k: int,
+    top_k: int = 10,
 ) -> list[SearchResult]:
-    """Perform dense vector search against Qdrant."""
+    """Run dense semantic search against Qdrant."""
 
     if top_k <= 0:
         return []
 
     if qdrant_client is None:
-        raise ValueError("qdrant_client must be provided")
+        raise ValueError("qdrant_client is required")
 
-    qdrant_filter = _to_qdrant_filter(filt)
+    qdrant_filter = _to_qdrant_filter(requirements_filter)
 
     search_kwargs: dict[str, Any] = {
         "collection_name": collection_name,
@@ -249,9 +242,8 @@ def _qdrant_search(
         flattened_metadata = _flatten_metadata(payload)
 
         text = payload.get("text", "")
-
-        if not isinstance(text, str):
-            text = str(text)
+        if text is None:
+            text = ""
 
         property_id = payload.get(
             "property_id",
@@ -263,9 +255,9 @@ def _qdrant_search(
             flattened_metadata.get("chunk_id"),
         )
 
-        source_file = payload.get(
-            "source_file",
-            flattened_metadata.get("source_file"),
+        source_file = _get_source_file(
+            payload,
+            flattened_metadata,
         )
 
         results.append(
@@ -280,15 +272,11 @@ def _qdrant_search(
                     if chunk_id is not None
                     else None
                 ),
-                text=text,
+                text=str(text),
                 metadata=flattened_metadata,
                 semantic_score=score,
                 combined_score=score,
-                source_file=(
-                    str(source_file)
-                    if source_file is not None
-                    else None
-                ),
+                source_file=source_file,
             )
         )
 
@@ -296,7 +284,7 @@ def _qdrant_search(
 
 
 # ---------------------------------------------------------------------------
-# Metadata filtering for lexical retrieval
+# Requirement matching
 # ---------------------------------------------------------------------------
 
 
@@ -304,43 +292,46 @@ def _matches_requirements(
     chunk: dict[str, Any],
     requirements_filter: MetadataFilter | None,
 ) -> bool:
-    """Apply hard metadata constraints to a lexical-search chunk."""
+    """Check whether a corpus chunk satisfies metadata requirements."""
 
-    if requirements_filter is None or requirements_filter.is_empty():
+    if requirements_filter is None:
         return True
 
     flattened_metadata = _flatten_metadata(chunk)
 
-    return matches(flattened_metadata, requirements_filter)
+    return matches(
+        flattened_metadata,
+        requirements_filter,
+    )
 
 
 # ---------------------------------------------------------------------------
-# BM25 / lexical search
+# BM25 lexical search
 # ---------------------------------------------------------------------------
 
 
 def _bm25_search(
     query: str,
     corpus_chunks: list[dict[str, Any]],
-    top_k: int,
     requirements_filter: MetadataFilter | None = None,
+    top_k: int = 10,
 ) -> list[SearchResult]:
-    """Perform BM25 retrieval over an explicitly supplied corpus.
+    """Run BM25 lexical search over an explicit in-memory corpus."""
 
-    Hard metadata constraints are applied before BM25 scoring.
+    if top_k <= 0:
+        return []
 
-    The function intentionally does not load data from Qdrant. The caller
-    is responsible for supplying the lexical corpus.
-    """
-
-    if top_k <= 0 or not corpus_chunks:
+    if not corpus_chunks:
         return []
 
     filtered_chunks = [
         chunk
         for chunk in corpus_chunks
         if isinstance(chunk, dict)
-        and _matches_requirements(chunk, requirements_filter)
+        and _matches_requirements(
+            chunk,
+            requirements_filter,
+        )
     ]
 
     if not filtered_chunks:
@@ -351,53 +342,41 @@ def _bm25_search(
     for chunk in filtered_chunks:
         text = chunk.get("text", "")
 
-        if not isinstance(text, str):
-            text = str(text)
+        if text is None:
+            text = ""
 
-        documents.append(text)
+        documents.append(str(text))
 
-    if not documents:
-        return []
-
-    tokenized_corpus = [
+    tokenized_documents = [
         document.lower().split()
         for document in documents
     ]
 
-    if not tokenized_corpus:
+    tokenized_query = query.lower().split()
+
+    if not tokenized_query:
         return []
 
-    bm25 = BM25Okapi(tokenized_corpus)
-
-    query_tokens = query.lower().split()
-
-    if not query_tokens:
-        return []
-
-    scores = bm25.get_scores(query_tokens)
+    bm25 = BM25Okapi(tokenized_documents)
+    scores = bm25.get_scores(tokenized_query)
 
     ranked_indices = sorted(
         range(len(scores)),
-        key=lambda index: float(scores[index]),
+        key=lambda index: scores[index],
         reverse=True,
     )
 
     results: list[SearchResult] = []
 
-    for index in ranked_indices[:top_k]:
+    for index in ranked_indices:
         score = float(scores[index])
 
-        # BM25 score <= 0 means there is no useful lexical match.
         if score <= 0:
             continue
 
         chunk = filtered_chunks[index]
+
         flattened_metadata = _flatten_metadata(chunk)
-
-        text = chunk.get("text", "")
-
-        if not isinstance(text, str):
-            text = str(text)
 
         property_id = chunk.get(
             "property_id",
@@ -409,9 +388,13 @@ def _bm25_search(
             flattened_metadata.get("chunk_id"),
         )
 
-        source_file = chunk.get(
-            "source_file",
-            flattened_metadata.get("source_file"),
+        text = chunk.get("text", "")
+        if text is None:
+            text = ""
+
+        source_file = _get_source_file(
+            chunk,
+            flattened_metadata,
         )
 
         results.append(
@@ -426,17 +409,16 @@ def _bm25_search(
                     if chunk_id is not None
                     else None
                 ),
-                text=text,
+                text=str(text),
                 metadata=flattened_metadata,
                 lexical_score=score,
                 combined_score=score,
-                source_file=(
-                    str(source_file)
-                    if source_file is not None
-                    else None
-                ),
+                source_file=source_file,
             )
         )
+
+        if len(results) >= top_k:
+            break
 
     return results
 
@@ -447,24 +429,19 @@ def _bm25_search(
 
 
 def _min_max_normalize(scores: list[float]) -> list[float]:
-    """Normalize scores into the [0, 1] range.
-
-    If all scores are identical, every score is treated as 1.0.
-    """
+    """Normalize scores to the [0, 1] range."""
 
     if not scores:
         return []
 
-    min_score = min(scores)
-    max_score = max(scores)
+    minimum = min(scores)
+    maximum = max(scores)
 
-    if max_score == min_score:
-        return [1.0] * len(scores)
-
-    denominator = max_score - min_score
+    if minimum == maximum:
+        return [1.0 for _ in scores]
 
     return [
-        (score - min_score) / denominator
+        (score - minimum) / (maximum - minimum)
         for score in scores
     ]
 
@@ -476,8 +453,8 @@ def _min_max_normalize(scores: list[float]) -> list[float]:
 
 def hybrid_search(
     query: str,
-    requirements_filter: MetadataFilter | None = None,
-    collection_name: str = "properties",
+    requirements_filter: MetadataFilter | None,
+    collection_name: str,
     qdrant_client: Any = None,
     top_k: int = 10,
     semantic_weight: float = 0.7,
@@ -486,88 +463,53 @@ def hybrid_search(
     *,
     client: Any = None,
 ) -> list[SearchResult]:
-    """Perform dense retrieval with optional BM25 lexical retrieval.
+    """Run hybrid semantic + lexical retrieval.
 
-    Args:
-        query:
-            User search query.
+    When ``corpus_chunks`` is None, retrieval gracefully falls back to
+    semantic-only Qdrant search.
 
-        requirements_filter:
-            Hard metadata constraints.
-
-        collection_name:
-            Qdrant collection containing property chunks.
-
-        qdrant_client:
-            Qdrant client instance.
-
-        client:
-            Backwards-compatible alias for ``qdrant_client``.
-
-        top_k:
-            Maximum number of final results.
-
-        semantic_weight:
-            Weight assigned to dense semantic retrieval.
-
-        lexical_weight:
-            Weight assigned to BM25 lexical retrieval.
-
-        corpus_chunks:
-            Optional in-memory corpus used for BM25 retrieval.
-            If omitted, retrieval is semantic-only.
-
-    Returns:
-        Search results sorted by ``combined_score`` descending.
+    ``client`` is accepted as a backwards-compatible alias for
+    ``qdrant_client``.
     """
-
-    # ------------------------------------------------------------------
-    # Validation
-    # ------------------------------------------------------------------
 
     if not isinstance(query, str) or not query.strip():
         raise ValueError("query must be a non-empty string")
 
     if top_k <= 0:
-        raise ValueError("top_k must be greater than 0")
-
-    if semantic_weight < 0 or lexical_weight < 0:
-        raise ValueError("retrieval weights cannot be negative")
-
-    total_weight = semantic_weight + lexical_weight
-
-    if total_weight <= 0:
-        raise ValueError(
-            "semantic_weight + lexical_weight must be greater than 0"
-        )
-
-    query = query.strip()
+        return []
 
     if qdrant_client is None:
         qdrant_client = client
 
     if qdrant_client is None:
-        raise ValueError("qdrant_client must be provided")
+        raise ValueError("qdrant_client is required")
 
-    # Normalize weights so they sum to 1.
-    semantic_weight /= total_weight
-    lexical_weight /= total_weight
+    if semantic_weight < 0 or lexical_weight < 0:
+        raise ValueError("search weights must be non-negative")
 
-    # ------------------------------------------------------------------
-    # Dense retrieval
-    # ------------------------------------------------------------------
+    total_weight = semantic_weight + lexical_weight
 
+    if total_weight <= 0:
+        raise ValueError(
+            "at least one search weight must be greater than zero"
+        )
+
+    semantic_weight = semantic_weight / total_weight
+    lexical_weight = lexical_weight / total_weight
+
+    # Keep this positional call compatible with lightweight test/service
+    # adapters that still use the older ``filt`` parameter name.
     semantic_results = _qdrant_search(
-        query=query,
-        filt=requirements_filter,
-        collection_name=collection_name,
-        qdrant_client=qdrant_client,
-        top_k=top_k,
+        query,
+        requirements_filter,
+        collection_name,
+        qdrant_client,
+        top_k,
     )
 
-    # ------------------------------------------------------------------
-    # Semantic-only retrieval
-    # ------------------------------------------------------------------
+    # -----------------------------------------------------------------------
+    # Semantic-only fallback
+    # -----------------------------------------------------------------------
 
     if corpus_chunks is None:
         semantic_scores = [
@@ -575,13 +517,13 @@ def hybrid_search(
             for result in semantic_results
         ]
 
-        normalized_semantic = _min_max_normalize(
+        normalized_scores = _min_max_normalize(
             semantic_scores
         )
 
         for result, normalized_score in zip(
             semantic_results,
-            normalized_semantic,
+            normalized_scores,
         ):
             result.combined_score = normalized_score
 
@@ -592,20 +534,16 @@ def hybrid_search(
 
         return semantic_results[:top_k]
 
-    # ------------------------------------------------------------------
+    # -----------------------------------------------------------------------
     # Lexical retrieval
-    # ------------------------------------------------------------------
+    # -----------------------------------------------------------------------
 
     lexical_results = _bm25_search(
         query=query,
         corpus_chunks=corpus_chunks,
-        top_k=top_k,
         requirements_filter=requirements_filter,
+        top_k=top_k,
     )
-
-    # ------------------------------------------------------------------
-    # Normalize scores
-    # ------------------------------------------------------------------
 
     semantic_scores = [
         result.semantic_score
@@ -625,24 +563,17 @@ def hybrid_search(
         lexical_scores
     )
 
-    # ------------------------------------------------------------------
-    # Merge results
-    # ------------------------------------------------------------------
+    # -----------------------------------------------------------------------
+    # Merge semantic + lexical results
+    # -----------------------------------------------------------------------
 
     merged: dict[str, SearchResult] = {}
 
-    # Add semantic results.
-    for index, (result, normalized_score) in enumerate(
-        zip(
-            semantic_results,
-            normalized_semantic,
-        )
+    for result, normalized_score in zip(
+        semantic_results,
+        normalized_semantic,
     ):
-        key = _result_key(
-            result,
-            fallback_prefix="semantic",
-            index=index,
-        )
+        key = _result_key(result)
 
         result.combined_score = (
             semantic_weight * normalized_score
@@ -650,43 +581,35 @@ def hybrid_search(
 
         merged[key] = result
 
-    # Add or merge lexical results.
-    for index, (result, normalized_score) in enumerate(
-        zip(
-            lexical_results,
-            normalized_lexical,
-        )
+    for result, normalized_score in zip(
+        lexical_results,
+        normalized_lexical,
     ):
-        key = _result_key(
-            result,
-            fallback_prefix="lexical",
-            index=index,
-        )
+        key = _result_key(result)
 
         if key in merged:
-            existing = merged[key]
+            merged[key].lexical_score = result.lexical_score
 
-            existing.lexical_score = result.lexical_score
-
-            existing.combined_score += (
+            merged[key].combined_score += (
                 lexical_weight * normalized_score
             )
+
+            if merged[key].source_file is None:
+                merged[key].source_file = result.source_file
+
+            if not merged[key].metadata and result.metadata:
+                merged[key].metadata = result.metadata
 
         else:
             result.combined_score = (
                 lexical_weight * normalized_score
             )
-
             merged[key] = result
 
-    # ------------------------------------------------------------------
-    # Final ranking
-    # ------------------------------------------------------------------
-
-    results = sorted(
+    final_results = sorted(
         merged.values(),
         key=lambda result: result.combined_score,
         reverse=True,
     )
 
-    return results[:top_k]
+    return final_results[:top_k]

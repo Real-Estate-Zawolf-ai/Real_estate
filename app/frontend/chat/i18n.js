@@ -1,0 +1,93 @@
+// UI strings (Arabic, Egyptian-leaning, and English). Property facts never come from here.
+const S = {
+  en: {
+    name: 'Atelier Assistant',
+    statusChecking: 'Checking availability…', statusUp: 'Available', statusDown: 'Temporarily unavailable',
+    launcher: 'Open the AI property assistant', launcherLabel: 'Ask our AI assistant',
+    close: 'Close assistant', minimize: 'Minimize assistant', expand: 'Expand assistant',
+    langToggle: 'Switch to Arabic', langBtn: 'ع',
+    placeholder: 'Describe the property you want…', inputLabel: 'Message to the property assistant', send: 'Send',
+    welcome: 'Welcome to Atelier. Tell me what you are looking for — property type, area, budget or bedrooms — and I will search the available listings. Arabic or English both work.',
+    searching: 'Searching properties…',
+    foundFallback: 'Here is what I found.',
+    groupCited: 'Mentioned in the answer', groupOthers: 'Other matches',
+    inAnswer: 'In the answer',
+    details: 'Details', id: 'ID', source: 'Source',
+    view: 'View property', contact: 'Contact agent', viewing: 'Request a viewing', compare: 'Compare',
+    selected: '{n} selected', compareGo: 'Compare', compareClear: 'Clear', compareMax: 'You can compare up to 3 properties.',
+    compareTitle: 'Comparison',
+    rowType: 'Type', rowLocation: 'Location', rowPrice: 'Price', rowBedrooms: 'Bedrooms', rowBathrooms: 'Bathrooms', rowArea: 'Area',
+    beds: '{n} bed', bedsN: '{n} beds', baths: '{n} bath', bathsN: '{n} baths', sqm: '{n} m²',
+    empty: "I couldn't find an exact match. Let's try changing the location, budget, or number of bedrooms.",
+    tryRelax: 'Try relaxing a filter:', refineHint: 'Want to narrow it down?',
+    without: 'Without {x}', removed: 'Without the “{x}” filter', removeFilter: 'Remove filter: {x}',
+    newSearch: 'New search', filtersLabel: 'Active search filters',
+    guide: 'Sure. What kind of property are you looking for?',
+    greeting: 'Hello! Tell me the type, area, budget or number of bedrooms and I will search for you.',
+    browseAll: 'Show me available properties',
+    errNetwork: "Sorry, I'm having trouble searching properties right now. Please try again.",
+    errServer: "Sorry, I'm having trouble searching properties right now. Please try again.",
+    errTimeout: 'The search is taking longer than expected. Please try again.',
+    errInvalid: "I couldn't process those search details. Try rephrasing your request.",
+    retry: 'Try again',
+  },
+  ar: {
+    name: 'مساعد أتيليه',
+    statusChecking: 'بنتأكد من التوفر…', statusUp: 'متاح', statusDown: 'غير متاح دلوقتي',
+    launcher: 'افتح مساعد العقارات الذكي', launcherLabel: 'اسأل المساعد الذكي',
+    close: 'إغلاق المساعد', minimize: 'تصغير المساعد', expand: 'تكبير المساعد',
+    langToggle: 'Switch to English', langBtn: 'EN',
+    placeholder: 'قولّي بتدوّر على إيه…', inputLabel: 'رسالة لمساعد العقارات', send: 'إرسال',
+    welcome: 'أهلاً بيك في أتيليه. قولّي بتدوّر على إيه — نوع العقار، المنطقة، الميزانية أو عدد الغرف — وأنا هدوّر في العقارات المتاحة. تقدر تكتب بالعربي أو بالإنجليزي.',
+    searching: 'بدوّر على العقارات…',
+    foundFallback: 'دي النتايج اللي لقيتها.',
+    groupCited: 'مذكورة في الإجابة', groupOthers: 'نتايج تانية',
+    inAnswer: 'في الإجابة',
+    details: 'التفاصيل', id: 'الكود', source: 'المصدر',
+    view: 'شوف العقار', contact: 'كلّم مندوب', viewing: 'اطلب معاينة', compare: 'قارن',
+    selected: 'اخترت {n}', compareGo: 'قارن', compareClear: 'مسح', compareMax: 'تقدر تقارن لحد 3 عقارات.',
+    compareTitle: 'المقارنة',
+    rowType: 'النوع', rowLocation: 'الموقع', rowPrice: 'السعر', rowBedrooms: 'غرف النوم', rowBathrooms: 'الحمامات', rowArea: 'المساحة',
+    beds: '{n} غرفة', bedsN: '{n} غرف', baths: '{n} حمام', bathsN: '{n} حمام', sqm: '{n} م²',
+    empty: 'مالقيتش نتيجة مطابقة تمامًا. جرّب نغيّر المنطقة أو الميزانية أو عدد الغرف.',
+    tryRelax: 'جرّب تشيل فلتر:', refineHint: 'تحب نحدّد أكتر؟',
+    without: 'من غير {x}', removed: 'من غير فلتر «{x}»', removeFilter: 'إزالة الفلتر: {x}',
+    newSearch: 'بحث جديد', filtersLabel: 'فلاتر البحث الحالية',
+    guide: 'أكيد. بتدوّر على نوع عقار إيه؟',
+    greeting: 'أهلاً! قولّي نوع العقار والمنطقة والميزانية أو عدد الغرف وأنا أدوّرلك.',
+    browseAll: 'عايز أشوف العقارات المتاحة',
+    errNetwork: 'معلش، فيه مشكلة في البحث دلوقتي. حاول تاني بعد شوية.',
+    errServer: 'معلش، فيه مشكلة في البحث دلوقتي. حاول تاني بعد شوية.',
+    errTimeout: 'البحث أخد وقت أطول من المتوقع. حاول تاني.',
+    errInvalid: 'ماقدرتش أفهم تفاصيل البحث دي. جرّب تعيد الصياغة.',
+    retry: 'حاول تاني',
+  },
+};
+
+export function t(lang, key, vars) {
+  let s = (S[lang] || S.en)[key] ?? S.en[key] ?? key;
+  if (vars) for (const [k, v] of Object.entries(vars)) s = s.replaceAll(`{${k}}`, v);
+  return s;
+}
+
+const QUICK = {
+  en: [
+    { label: 'Find a property', action: 'guide' },
+    { label: 'Villas', text: 'Show me villas' },
+    { label: 'Apartments', text: 'Show me apartments' },
+    { label: 'Rent', text: 'I want a property for rent' },
+    { label: 'Buy', text: 'I want a property to buy' },
+    { label: 'Sheikh Zayed', text: 'Properties in Sheikh Zayed' },
+    { label: 'New Cairo', text: 'Properties in New Cairo' },
+  ],
+  ar: [
+    { label: 'دور على عقار', action: 'guide' },
+    { label: 'فلل', text: 'عايز أشوف فلل' },
+    { label: 'شقق', text: 'عايز أشوف شقق' },
+    { label: 'إيجار', text: 'عايز عقار للإيجار' },
+    { label: 'شراء', text: 'عايز أشتري عقار' },
+    { label: 'الشيخ زايد', text: 'عقارات في الشيخ زايد' },
+    { label: 'التجمع', text: 'عقارات في التجمع' },
+  ],
+};
+export const quickActions = (lang) => QUICK[lang] || QUICK.en;
