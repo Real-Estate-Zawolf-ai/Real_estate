@@ -1,0 +1,10 @@
+[
+  {
+    "question_id": "q1",
+    "required_metadata": {
+      "location": "New Cairo",
+      "bedrooms": 3
+    },
+    "maximum_price": 5000000
+  }
+]

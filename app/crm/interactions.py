@@ -1,7 +1,7 @@
 """Conversation and contact history for CRM customers and leads."""
 
-from datetime import UTC, datetime
-from enum import StrEnum
+from datetime import datetime, timezone
+from enum import Enum
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from app.crm.client import CRMClient
 
 
-class InteractionChannel(StrEnum):
+class InteractionChannel(str, Enum):
     WEBSITE = "website"
     WHATSAPP = "whatsapp"
     PHONE = "phone"
@@ -26,7 +26,7 @@ class CreateInteraction(BaseModel):
 
 class Interaction(CreateInteraction):
     id: UUID = Field(default_factory=uuid4)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class InteractionService:

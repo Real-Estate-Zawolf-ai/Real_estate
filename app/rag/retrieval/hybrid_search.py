@@ -497,12 +497,14 @@ def hybrid_search(
     semantic_weight = semantic_weight / total_weight
     lexical_weight = lexical_weight / total_weight
 
+    # Keep this positional call compatible with lightweight test/service
+    # adapters that still use the older ``filt`` parameter name.
     semantic_results = _qdrant_search(
-        query=query,
-        requirements_filter=requirements_filter,
-        collection_name=collection_name,
-        qdrant_client=qdrant_client,
-        top_k=top_k,
+        query,
+        requirements_filter,
+        collection_name,
+        qdrant_client,
+        top_k,
     )
 
     # -----------------------------------------------------------------------

@@ -1,4 +1,5 @@
 import pytest
+from importlib import import_module
 from unittest.mock import MagicMock, patch
 
 from app.rag.retrieval.hybrid_search import (
@@ -9,7 +10,6 @@ from app.rag.retrieval.hybrid_search import (
     SearchResult,
 )
 from app.rag.retrieval.metadata_filter import MetadataFilter
-
 
 def test_min_max_normalize():
     # Standard case
@@ -138,10 +138,7 @@ def test_hybrid_search_semantic_only():
         ),
     ]
 
-    with patch(
-        "app.rag.retrieval.hybrid_search._qdrant_search",
-        return_value=mock_results,
-    ):
+    with patch("app.rag.retrieval.hybrid_search._qdrant_search", return_value=mock_results):
         # corpus_chunks=None triggers semantic-only path
         results = hybrid_search(
             "query",
@@ -198,10 +195,7 @@ def test_hybrid_search_combined():
         },  # lexical hit only
     ]
 
-    with patch(
-        "app.rag.retrieval.hybrid_search._qdrant_search",
-        return_value=semantic_results,
-    ):
+    with patch("app.rag.retrieval.hybrid_search._qdrant_search", return_value=semantic_results):
         # Search for "Cairo"
         results = hybrid_search(
             "Cairo",

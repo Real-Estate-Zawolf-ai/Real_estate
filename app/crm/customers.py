@@ -1,6 +1,6 @@
 """Customer records and customer-management operations."""
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, field_validator
@@ -30,8 +30,8 @@ class CreateCustomer(BaseModel):
 
 class Customer(CreateCustomer):
     id: UUID = Field(default_factory=uuid4)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class DuplicateCustomerError(ValueError):

@@ -3,8 +3,6 @@ from __future__ import annotations
 import logging
 from typing import Sequence
 
-from sentence_transformers import SentenceTransformer
-
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +46,10 @@ class EmbeddingModel:
         device: str | None = None,
     ) -> None:
         self.model_name = model_name
+
+        # Keep module imports lightweight for API startup and unit tests. The
+        # ML stack is only needed when an embedding is actually requested.
+        from sentence_transformers import SentenceTransformer
 
         logger.info(
             "Loading embedding model | model=%s | device=%s",

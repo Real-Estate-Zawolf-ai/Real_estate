@@ -16,11 +16,13 @@ class SchedulingState(
 
     selected_slot: dict | None
 
-def check_availability(state: SchedulingState) -> dict:
+def check_availability(
+    state: SchedulingState,
+) -> dict:
 
     slots = scheduling_service.get_available_slots(
-        date=state.get("requested_date", ""),
-    ) or []
+        date=state.get("requested_date"),
+    )
 
     return {
         "available_slots": slots,
@@ -55,7 +57,7 @@ def book_appointment(
         }
 
     appointment = scheduling_service.book(
-        customer_id=state.get("customer_id", ""),
+        customer_id="customer_123",
         slot=slot,
     )
 

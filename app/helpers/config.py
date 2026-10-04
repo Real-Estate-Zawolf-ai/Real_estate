@@ -63,9 +63,9 @@ class Settings(BaseSettings):
     # -----------------------------------------------------------------------
 
     QDRANT_CLUSTER_ENDPOINT: str | None = None
-    QDRANT_URL: str = "http://localhost:6333"
+    QDRANT_URL: str | None = None
     QDRANT_API_KEY: str | None = None
-    QDRANT_COLLECTION: str = "realEstate"
+    QDRANT_COLLECTION: str = "properties"
 
     # -----------------------------------------------------------------------
     # Other retrieval / AI providers
@@ -81,6 +81,8 @@ class Settings(BaseSettings):
     WHATSAPP_APP_SECRET: str | None = None
     WHATSAPP_ACCESS_TOKEN: str | None = None
     WHATSAPP_PHONE_NUMBER_ID: str | None = None
+    WHATSAPP_API_VERSION: str = "v23.0"
+    WHATSAPP_TRANSCRIPTION_MODEL: str = "whisper-large-v3-turbo"
 
     # -----------------------------------------------------------------------
     # PostgreSQL

@@ -4,8 +4,8 @@ The in-memory repository is useful for development and tests. Replace it with
 a database repository implementing the same methods before production.
 """
 
-from datetime import UTC, datetime
-from enum import StrEnum
+from datetime import datetime, timezone
+from enum import Enum
 from threading import Lock
 from uuid import UUID, uuid4
 
@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from app.scheduling.availability import TimeSlot, overlaps
 
 
-class BookingStatus(StrEnum):
+class BookingStatus(str, Enum):
     HOLD = "hold"
     CONFIRMED = "confirmed"
     CANCELLED = "cancelled"
@@ -40,8 +40,8 @@ class Booking(BaseModel):
     slot: TimeSlot
     status: BookingStatus = BookingStatus.HOLD
     notes: str | None = None
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class BookingConflictError(ValueError):
@@ -127,14 +127,14 @@ class BookingService:
         if booking.status == BookingStatus.CANCELLED:
             raise ValueError("Cancelled bookings cannot be confirmed.")
         booking.status = BookingStatus.CONFIRMED
-        booking.updated_at = datetime.now(UTC)
+        booking.updated_at = datetime.now(timezone.utc)
         return self.repository.save(booking)
 
     def cancel(self, booking_id: UUID) -> Booking:
         """Cancel a booking and free its slot for future reservations."""
         booking = self._get_required(booking_id)
         booking.status = BookingStatus.CANCELLED
-        booking.updated_at = datetime.now(UTC)
+        booking.updated_at = datetime.now(timezone.utc)
         return self.repository.save(booking)
 
     def _get_required(self, booking_id: UUID) -> Booking:

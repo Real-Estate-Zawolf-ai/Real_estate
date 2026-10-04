@@ -1,5 +1,7 @@
 from pathlib import Path
 import logging
+import os
+import tempfile
 
 from pypdf import PdfReader
 
@@ -71,9 +73,33 @@ def parse_pdf(file_path: str) -> str:
 
         if not full_text:
             logger.warning(
-                "No text extracted; PDF may be image-based | filename=%s",
+                "No text extracted; applying OCR to PDF pages | filename=%s",
                 file_path,
             )
+            try:
+                import fitz
+
+                from app.rag.ocr.extractor import OCRExtractor
+                from app.rag.ocr.post_processor import OCRPostProcessor
+
+                extractor = OCRExtractor()
+                ocr_pages: list[str] = []
+                with fitz.open(file_path) as document:
+                    for page in document:
+                        temporary_path: str | None = None
+                        try:
+                            with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as temporary:
+                                temporary_path = temporary.name
+                            page.get_pixmap(matrix=fitz.Matrix(2, 2)).save(temporary_path)
+                            text = extractor.extract_from_image(temporary_path)
+                            if text.strip():
+                                ocr_pages.append(text)
+                        finally:
+                            if temporary_path and os.path.exists(temporary_path):
+                                os.unlink(temporary_path)
+                full_text = OCRPostProcessor().process("\n\n".join(ocr_pages)).text
+            except Exception:
+                logger.exception("PDF OCR fallback failed | filename=%s", file_path)
         else:
             logger.info(
                 "PDF text extracted successfully | filename=%s | characters=%d",

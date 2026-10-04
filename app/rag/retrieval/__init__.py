@@ -19,7 +19,8 @@ from .metadata_filter import (
     EqualityConstraint,
     RangeConstraint,
 )
-from .hybrid_search import hybrid_search, embed_query, SearchResult
+from . import hybrid_search
+from .hybrid_search import SearchResult, embed_query
 from .reranker import rerank, rerank_with_trace
 
 __all__ = [

@@ -68,15 +68,22 @@ class ConversationState(TypedDict, total=False):
 
     response: str
 
-def router (state: ConversationState) -> dict:
+def router(state: ConversationState) -> dict:
     """
     Determine the next agent to handle the conversation
     based on the current state.
     """
 
-    return {
-        "intent": "property_search"
-    }
+    query = state.get("query", "").lower()
+    if any(word in query for word in ("property", "apartment", "villa", "house", "عقار", "شقة", "فيلا")):
+        intent = "property_search"
+    elif any(word in query for word in ("schedule", "appointment", "viewing", "موعد", "معاينة")):
+        intent = "scheduling"
+    elif any(word in query for word in ("budget", "timeline", "buy", "rent", "ميزانية", "شراء", "إيجار")):
+        intent = "qualification"
+    else:
+        intent = "conversational"
+    return {"intent": intent}
 
 def route_agent(state: ConversationState) -> str:
 

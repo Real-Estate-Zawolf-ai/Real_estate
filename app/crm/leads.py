@@ -1,7 +1,7 @@
 """Lead records and sales-qualification operations."""
 
-from datetime import UTC, datetime
-from enum import StrEnum
+from datetime import datetime, timezone
+from enum import Enum
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from app.crm.client import CRMClient
 
 
-class LeadStatus(StrEnum):
+class LeadStatus(str, Enum):
     NEW = "new"
     QUALIFYING = "qualifying"
     QUALIFIED = "qualified"
@@ -31,8 +31,8 @@ class Lead(CreateLead):
     id: UUID = Field(default_factory=uuid4)
     status: LeadStatus = LeadStatus.NEW
     score: int = Field(default=0, ge=0, le=100)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class LeadNotFoundError(LookupError):
@@ -56,7 +56,7 @@ class LeadService:
         if lead is None:
             raise LeadNotFoundError(f"Lead {lead_id} was not found.")
         lead.status = status
-        lead.updated_at = datetime.now(UTC)
+        lead.updated_at = datetime.now(timezone.utc)
         return self.client.save("leads", lead.id, lead)
 
     def update_score(self, lead_id: UUID, score: int) -> Lead:
@@ -67,5 +67,5 @@ class LeadService:
         if lead is None:
             raise LeadNotFoundError(f"Lead {lead_id} was not found.")
         lead.score = score
-        lead.updated_at = datetime.now(UTC)
+        lead.updated_at = datetime.now(timezone.utc)
         return self.client.save("leads", lead.id, lead)

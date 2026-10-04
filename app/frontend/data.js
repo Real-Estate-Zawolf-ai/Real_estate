@@ -1,5 +1,5 @@
-// Development-only preview data. Replace this module with the property API
-// client once app/api/routes/properties.py exposes real inventory endpoints.
+// Fallback inventory shown while the development property catalogue is empty.
+// Production deployments should populate /properties from a durable repository.
 export const previewProperties = [
   { id: 'mivida-courtyard', title: 'Courtyard Residence', type: 'Apartment', location: 'New Cairo', price: 4850000, beds: 3, baths: 2, area: 185, badge: 'Featured', image: 'https://images.unsplash.com/photo-1600585154340-be6161a56a0c?auto=format&fit=crop&w=1400&q=85', description: 'A calm, considered home overlooking landscaped courtyards. Floor-to-ceiling glazing brings the garden into every living space.', features: ['Private parking', 'Clubhouse access', '24/7 security', 'Balcony'], developer: 'Emaar Misr' },
   { id: 'zayed-villa', title: 'Garden Villa, Zayed', type: 'Villa', location: 'Sheikh Zayed', price: 12800000, beds: 5, baths: 4, area: 420, badge: 'New', image: 'https://images.unsplash.com/photo-1600607687939-ce8a6c25118c?auto=format&fit=crop&w=1400&q=85', description: 'An architectural family villa with generous entertaining spaces, a private garden, and effortless access to the city.', features: ['Private garden', 'Maid room', 'Covered parking', 'Smart home'], developer: 'SODIC' },
