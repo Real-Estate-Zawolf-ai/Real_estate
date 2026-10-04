@@ -164,10 +164,9 @@ async def rag_search(request: RAGRequest) -> dict[str, Any]:
             retrieval_top_k=request.retrieval_top_k,
         )
     except Exception as error:
-        logger.exception("RAG workflow failed")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"RAG workflow failed: {error}",
+            detail="RAG workflow is unavailable",
         ) from error
 
 
