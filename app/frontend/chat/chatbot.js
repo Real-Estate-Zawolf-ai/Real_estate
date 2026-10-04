@@ -425,11 +425,17 @@ export function initChatbot({ resolvePropertyHref = () => null, appRoot = null }
     const loader = showLoader(req.lang);
     let el;
     try {
-      const payload = buildPayload({ query: req.query, requirements: req.requirements, history: toHistory() });
+      // The current turn is sent in `query`; history only contains earlier turns.
+      const payload = buildPayload({ query: req.query, requirements: req.requirements, history: toHistory().slice(0, -1) });
       const data = await searchProperties(payload);
       loader.remove();
       state.health = 'up';
       renderStatus();
+      if (data.response_type === 'conversational') {
+        el = pushMessage({ role: 'assistant', kind: 'text', lang: req.lang, text: data.answer || t(req.lang, 'greeting') });
+        scrollLog(false, el);
+        return;
+      }
       // cited properties first, then other grounding properties, then the rest in backend (reranked) order
       const rank = (p) => (data.cited.includes(p.id) ? 0 : data.grounding.includes(p.id) ? 1 : 2);
       const props = data.properties.map(normalizeProperty).filter((p) => p.id)
@@ -476,15 +482,15 @@ export function initChatbot({ resolvePropertyHref = () => null, appRoot = null }
       scrollLog(true);
       return;
     }
-    const merged = opts.filtersOverride ?? mergeFilters(state.filters, parsed);
-    state.filters = merged;
+    const hasCurrentFilters = Object.keys(parsed).length > 0;
+    const merged = opts.filtersOverride ?? (hasCurrentFilters ? mergeFilters(state.filters, parsed) : state.filters);
+    if (opts.filtersOverride || hasCurrentFilters) state.filters = merged;
     renderFilters();
-    // The backend is stateless: carry earlier filters as readable text, and send them as structured requirements too.
-    const carried = Object.fromEntries(Object.entries(merged).filter(([k]) => !(k in parsed)));
     const query = opts.filtersOverride
       ? humanize(merged, lang) || t(lang, 'browseAll')
-      : [text, humanize(carried, lang)].filter(Boolean).join(' — ');
-    await runSearch({ query, requirements: toRequirements(merged), lang });
+      : text;
+    const isPropertyFilterTurn = Boolean(opts.filtersOverride) || hasCurrentFilters;
+    await runSearch({ query, requirements: isPropertyFilterTurn ? toRequirements(merged) : {}, lang });
   }
 
   // ---------- events ----------

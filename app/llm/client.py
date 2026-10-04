@@ -15,8 +15,16 @@ class LLMClient:
         model: str | None = None,
     ):
         settings = get_settings()
-        self.client = Groq(api_key=api_key or settings.GROQ_API_KEY)
-        self.model = model or settings.GENERATION_MODEL_ID or settings.GROQ_MODEL
+        configured_api_key = api_key or settings.GROQ_API_KEY
+        if not configured_api_key:
+            raise RuntimeError("GROQ_API_KEY is not configured.")
+        self.client = Groq(api_key=configured_api_key)
+        self.model = (
+            model
+            or getattr(settings, "GENERATION_MODEL_ID", None)
+            or settings.GENERATION_MODEL
+            or settings.GROQ_MODEL
+        )
 
     def generate(
         self,
@@ -36,11 +44,30 @@ class LLMClient:
             "content": prompt,
         })
 
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-        )
+        return self.generate_messages(messages)
 
+    def generate_messages(
+        self,
+        messages: list[dict[str, str]],
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> str:
+        """Generate from an explicit conversation message list."""
+        if not messages:
+            raise ValueError("At least one message is required for generation.")
+
+        request = {
+            "model": self.model,
+            "messages": messages,
+        }
+        if temperature is not None:
+            request["temperature"] = temperature
+        if max_tokens is not None:
+            request["max_tokens"] = max_tokens
+
+        response = self.client.chat.completions.create(**request)
+        if not response.choices:
+            raise ValueError("LLM returned no completion choices.")
         return response.choices[0].message.content or ""
 
     def generate_structured(

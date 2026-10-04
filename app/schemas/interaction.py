@@ -12,9 +12,12 @@ class ChatRequest(BaseModel):
     customer_id: str | None = None
     channel: Literal["website", "whatsapp"] = "website"
     requirements: dict[str, Any] = Field(default_factory=dict)
+    history: list[dict[str, str]] = Field(default_factory=list)
 
 
 class ChatResponse(BaseModel):
-    intent: str
-    response: str
-    candidates: list[dict[str, Any]] = Field(default_factory=list)
+    answer: str
+    response_type: Literal["property", "conversational"] = "conversational"
+    cited_property_ids: list[str] = Field(default_factory=list)
+    grounding_property_ids: list[str] = Field(default_factory=list)
+    properties: list[dict[str, Any]] = Field(default_factory=list)

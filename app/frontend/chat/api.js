@@ -16,7 +16,7 @@ export function buildPayload({ query, requirements, history }) {
     top_k: CONFIG.topK,
     retrieval_top_k: CONFIG.retrievalTopK,
   };
-  // Ready for multi-turn backends: flip SEND_HISTORY in runtime-config.js.
+  // The /chat endpoint accepts recent turns for contextual refinement routing.
   if (CONFIG.sendHistory && history?.length) payload.history = history.slice(-CONFIG.maxHistoryTurns * 2);
   return payload;
 }
@@ -45,6 +45,7 @@ export async function searchProperties(payload, { timeoutMs = CONFIG.timeoutMs }
   try { data = await res.json(); } catch { throw new ApiError('server', res.status); }
   return {
     answer: typeof data?.answer === 'string' ? data.answer.trim() : '',
+    response_type: data?.response_type === 'property' ? 'property' : 'conversational',
     cited: ids(data?.cited_property_ids),
     grounding: ids(data?.grounding_property_ids),
     properties: Array.isArray(data?.properties) ? data.properties : [],
