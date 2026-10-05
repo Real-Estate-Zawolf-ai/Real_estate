@@ -50,6 +50,8 @@ def run_property_workflow(state: PropertyState) -> dict:
     return {
         "response": result["answer"],
         "candidates": result["properties"],
+        "cited_property_ids": result["cited_property_ids"],
+        "grounding_property_ids": result["grounding_property_ids"],
     }
 
 

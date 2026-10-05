@@ -9,14 +9,13 @@ window.APP_CONFIG = {
   // Default language of the chat interface: 'ar' or 'en'. Users can switch in the chat header.
   CHAT_DEFAULT_LANG: 'ar',
 
-  // How long to wait for /rag/search before showing the timeout message (ms).
+  // How long to wait for /chat before showing the timeout message (ms).
   REQUEST_TIMEOUT_MS: 60000,
 
-  // Send conversation history to the backend as `history` (the current RAGRequest ignores it).
-  // Flip to true once the backend accepts it.
-  SEND_HISTORY: false,
+  // Send recent turns to /chat so the router can resolve property refinements.
+  SEND_HISTORY: true,
 
-  // Extra requirement keys to send to /rag/search. By default only the three keys from the
+  // Extra requirement keys to send to /chat. By default only the three keys from the
   // API example are sent (property_type, district, bedrooms). Budget and buy/rent stay in the
   // query text until you map them to the keys build_metadata_filter() actually supports, e.g.:
   // REQUIREMENT_KEYS: { max_budget: 'max_price', listing_type: 'listing_type' },

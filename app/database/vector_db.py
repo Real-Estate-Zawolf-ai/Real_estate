@@ -11,7 +11,7 @@ from qdrant_client import QdrantClient, models
 from app.rag.embeddings import EMBEDDING_DIMENSION
 
 
-DEFAULT_COLLECTION = "properties"
+DEFAULT_COLLECTION = "realEstate"
 
 _POINT_ID_NAMESPACE = NAMESPACE_URL
 

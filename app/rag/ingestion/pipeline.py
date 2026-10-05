@@ -19,7 +19,7 @@ Architecture notes:
     - For property datasets, JSON stored in the `metadata` column is
       parsed before field mapping.
     - Each property keeps its own canonical metadata and identity.
-    - Images are loaded here but OCR/CV remain separate components.
+    - Images are processed by OCR and visual CV before normalization.
     - Embeddings and vector storage are intentionally NOT handled here.
     - The output of this pipeline is ready for the indexing layer.
 """
@@ -29,6 +29,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any, Callable
 
@@ -255,6 +256,34 @@ def _normalize_text(text: str) -> dict[str, Any]:
         return {}
 
     return normalized
+
+
+def _is_floorplan_image(path: Path, metadata: dict[str, Any]) -> bool:
+    """Recognize floor plans explicitly, with a filename fallback."""
+    kind = str(metadata.get("image_kind", "")).strip().lower()
+    if kind in {"floorplan", "floor_plan", "floor-plan", "layout", "sketch"}:
+        return True
+    if kind in {"photo", "property_photo", "listing_photo"}:
+        return False
+
+    source_name = str(metadata.get("original_file_name") or path.name).lower()
+    return bool(re.search(r"(?:floor[ _-]?plan|layout|unit[ _-]?sketch)", source_name))
+
+
+def _visual_features_text(features: Any) -> str:
+    """Format CV attributes as searchable text for chunking and embedding."""
+    details: list[str] = []
+    if features.caption:
+        details.append(f"Visual description: {features.caption}")
+    if features.room_type:
+        details.append(f"Visually identified room type: {features.room_type}")
+    if features.condition:
+        details.append(f"Visually estimated condition: {features.condition}")
+    if features.style_tags:
+        details.append(f"Visual style: {', '.join(features.style_tags)}")
+    if features.detected_amenities:
+        details.append(f"Visually detected amenities: {', '.join(features.detected_amenities)}")
+    return "\n".join(details)
 
 
 # ============================================================
@@ -622,9 +651,57 @@ def ingest_file(
     if source_type == "image":
         from app.rag.ocr.extractor import OCRExtractor
         from app.rag.ocr.post_processor import OCRPostProcessor
+        from app.rag.cv.vision_extractor import extract_visual_features
 
         extracted_text = OCRExtractor().extract_from_image(path)
-        raw_content = OCRPostProcessor().process(extracted_text).text
+        ocr_text = OCRPostProcessor().process(extracted_text).text
+        source_name = str(document_metadata.get("original_file_name") or path.name)
+        content_parts = [ocr_text] if ocr_text else []
+        try:
+            visual_features = extract_visual_features(path, source_file=source_name)
+            content_parts.append(_visual_features_text(visual_features))
+            document_metadata.update({
+                "cv_applied": True,
+                "visual_room_type": visual_features.room_type,
+                "visual_condition": visual_features.condition,
+                "visual_style_tags": visual_features.style_tags,
+                "visual_amenities": visual_features.detected_amenities,
+                "visual_caption": visual_features.caption,
+                "visual_confidence": visual_features.confidence,
+            })
+        except Exception as error:
+            logger.exception("Image CV extraction failed | file=%s", path)
+            document_metadata["cv_applied"] = False
+            document_metadata["cv_error"] = str(error)
+
+        if _is_floorplan_image(path, document_metadata):
+            from app.rag.cv.floorplan_parser import parse_floorplan
+
+            try:
+                floorplan = parse_floorplan(path, source_file=source_name)
+                document_metadata["floorplan_analysis"] = {
+                    "room_count_estimate": floorplan.room_count_estimate,
+                    "image_size": list(floorplan.image_size),
+                    "confidence": floorplan.confidence,
+                    "notes": floorplan.notes,
+                    "regions": [
+                        {
+                            "label": region.label,
+                            "bounding_box": list(region.bounding_box),
+                            "area_px": region.area_px,
+                            "approx_shape": region.approx_shape,
+                        }
+                        for region in floorplan.regions
+                    ],
+                }
+                content_parts.append(
+                    f"Floor plan analysis: estimated {floorplan.room_count_estimate} room-like regions."
+                )
+            except Exception as error:
+                logger.exception("Floor plan analysis failed | file=%s", path)
+                document_metadata["floorplan_analysis_error"] = str(error)
+
+        raw_content = "\n\n".join(content_parts)
         document_metadata["ocr_applied"] = True
 
     # ========================================================
@@ -1058,4 +1135,3 @@ def ingest_directory(
     )
 
     return summary
-

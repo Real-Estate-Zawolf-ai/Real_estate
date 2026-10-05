@@ -3,7 +3,7 @@ const rc = (typeof window !== 'undefined' && window.APP_CONFIG) || {};
 
 export const CONFIG = Object.freeze({
   apiBase: String(rc.API_BASE_URL ?? '').replace(/\/+$/, ''),
-  ragPath: '/rag/search',
+  ragPath: '/chat',
   healthPath: '/health',
   timeoutMs: Number(rc.REQUEST_TIMEOUT_MS) > 0 ? Number(rc.REQUEST_TIMEOUT_MS) : 60000,
   defaultLang: rc.CHAT_DEFAULT_LANG === 'en' ? 'en' : 'ar',

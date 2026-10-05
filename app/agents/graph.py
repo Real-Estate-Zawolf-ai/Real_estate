@@ -31,7 +31,7 @@ def build_graph():
     )
 
     builder.add_node(
-        "qualification",
+        "qualification_agent",
         qualification_graph,
     )
 
@@ -57,14 +57,14 @@ def build_graph():
         {
             "conversational": "conversational",
             "property": "property",
-            "qualification": "qualification",
+            "qualification": "qualification_agent",
             "scheduling": "scheduling",
         },
     )
 
     builder.add_edge("conversational", END)
     builder.add_edge("property", END)
-    builder.add_edge("qualification", END)
+    builder.add_edge("qualification_agent", END)
     builder.add_edge("scheduling", END)
 
     return builder.compile()

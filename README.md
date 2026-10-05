@@ -637,6 +637,10 @@ The structured information can then be associated with the text/vector represent
 
 ## Property Images
 
+The file ingestion endpoint runs OCR and the visual feature extractor for uploaded images. Successful CV output is added to searchable chunk text and preserved in chunk metadata, so captions, visual room types, condition estimates, styles, and detected amenities can contribute to vector retrieval. Uploads marked `image_kind=floorplan` also run the floor-plan parser and index its estimated room-region count; the filename is used as a fallback hint when it contains `floorplan`, `floor-plan`, `layout`, or `unit-sketch`. CV failures are recorded in metadata and do not prevent OCR text from being indexed.
+
+`image_kind` is an optional multipart form field on `POST /documents/ingest`; accepted values are `photo` and `floorplan`.
+
 ```text
 Property Image
        │
