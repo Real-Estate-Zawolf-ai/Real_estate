@@ -2,13 +2,7 @@
 
 from langgraph.graph import START, END, StateGraph
 
-from .state import SchedulingState
-
-from .state import (
-    check_availability,
-    select_slot,
-    book_appointment,
-)
+from .state import SchedulingState, advance_scheduling
 
 
 def build_scheduling_graph():
@@ -17,38 +11,20 @@ def build_scheduling_graph():
         SchedulingState
     )
 
+    # One step per turn: the flow position lives in state["scheduling"],
+    # so each customer reply advances the booking by one stage.
     builder.add_node(
-        "check_availability",
-        check_availability,
-    )
-
-    builder.add_node(
-        "select_slot",
-        select_slot,
-    )
-
-    builder.add_node(
-        "book",
-        book_appointment,
+        "advance_scheduling",
+        advance_scheduling,
     )
 
     builder.add_edge(
         START,
-        "check_availability",
+        "advance_scheduling",
     )
 
     builder.add_edge(
-        "check_availability",
-        "select_slot",
-    )
-
-    builder.add_edge(
-        "select_slot",
-        "book",
-    )
-
-    builder.add_edge(
-        "book",
+        "advance_scheduling",
         END,
     )
 

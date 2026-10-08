@@ -2,12 +2,10 @@
 // Builds DOM with textContent only (never innerHTML with data), so backend text cannot inject markup.
 import { CONFIG } from './config.js';
 import { t, quickActions } from './i18n.js';
-import { searchProperties, checkHealth, buildPayload, ApiError } from './api.js';
-import {
-  parseFilters, mergeFilters, removeFilter, toRequirements, humanize, describeFilters,
-  refineChips, typeChips, detectLang, normalize, GREETING,
-} from './requirements.js';
+import { sendChat, checkHealth, buildPayload, parseTurn, resetConversation, ApiError } from './api.js';
+import { fromServerRequirements, SERVER_KEYS, describeFilters, refineChips, typeChips, detectLang } from './requirements.js';
 import { normalizeProperty, formatPrice, formatNumber } from './normalize.js';
+import { VoiceSession } from './voice.js';
 
 const STORE_KEY = 'atelier-chat-v1';
 const MAX_STORED = 40;
@@ -19,6 +17,10 @@ const ICON = {
   min: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M6 12h12"/></svg>',
   expand: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 14l6-6 6 6"/></svg>',
   send: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"/></svg>',
+  mic: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg>',
+  micOff: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 9.5V6a3 3 0 0 0-5.7-1.3M9 9v2a3 3 0 0 0 4.6 2.5M5.5 11a6.5 6.5 0 0 0 10.8 4.9M18.5 11c0 .8-.1 1.5-.4 2.2M12 17.5V21M4 4l16 16"/></svg>',
+  hangup: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>',
+  hush: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4zM16 9.5l5 5M21 9.5l-5 5"/></svg>',
 };
 
 function h(tag, attrs = {}, ...kids) {
@@ -62,6 +64,10 @@ export function initChatbot({ resolvePropertyHref = () => null, appRoot = null }
     healthChecked: false,
     unread: false,
     compare: [],
+    // Signed server session: the same conversation for typed and spoken turns.
+    sessionId: typeof saved.sessionId === 'string' ? saved.sessionId : null,
+    voice: 'idle',
+    muted: false,
   };
   const catalog = new Map();
   for (const m of state.messages) if (m.kind === 'results') m.properties.forEach((p) => catalog.set(p.id, p));
@@ -88,8 +94,19 @@ export function initChatbot({ resolvePropertyHref = () => null, appRoot = null }
   const compareBar = h('div', { class: 'cb-comparebar', hidden: true }, compareInfo, h('span', { class: 'cb-compare-actions' }, compareClear, compareGo));
   const ta = h('textarea', { class: 'cb-input', rows: '1', maxlength: '500', dir: 'auto', autocomplete: 'off', enterkeyhint: 'send' });
   const sendBtn = h('button', { type: 'submit', class: 'cb-send', html: ICON.send, disabled: true });
-  const form = h('form', { class: 'cb-form' }, ta, sendBtn);
-  const panel = h('section', { class: 'cb-panel', id: 'cb-panel', role: 'dialog', 'aria-labelledby': 'cb-title', hidden: true }, header, log, filtersBar, compareBar, form);
+  const micBtn = h('button', { type: 'button', class: 'cb-mic', html: ICON.mic, 'aria-pressed': 'false', hidden: !CONFIG.voiceEnabled });
+  const form = h('form', { class: 'cb-form' }, ta, micBtn, sendBtn);
+
+  const voiceStatus = h('span', { class: 'cb-voice-status', role: 'status' });
+  const voiceCaption = h('p', { class: 'cb-voice-caption', dir: 'auto', 'aria-hidden': 'true' });
+  const muteBtn = h('button', { type: 'button', class: 'cb-iconbtn cb-voice-btn', html: ICON.mic, 'aria-pressed': 'false' });
+  const hushBtn = h('button', { type: 'button', class: 'cb-iconbtn cb-voice-btn', html: ICON.hush, hidden: true });
+  const endBtn = h('button', { type: 'button', class: 'cb-iconbtn cb-voice-btn cb-voice-end', html: ICON.hangup });
+  const voiceBar = h('div', { class: 'cb-voice', role: 'group', hidden: true, 'data-state': 'idle' },
+    h('span', { class: 'cb-voice-orb', 'aria-hidden': 'true' }),
+    h('div', { class: 'cb-voice-text' }, voiceStatus, voiceCaption),
+    h('div', { class: 'cb-voice-actions' }, hushBtn, muteBtn, endBtn));
+  const panel = h('section', { class: 'cb-panel', id: 'cb-panel', role: 'dialog', 'aria-labelledby': 'cb-title', hidden: true }, header, log, filtersBar, compareBar, voiceBar, form);
   const root = h('div', { class: 'cb', id: 'chatbot-root', 'data-mode': 'closed' }, launcher, panel);
   document.body.append(root);
 
@@ -125,10 +142,37 @@ export function initChatbot({ resolvePropertyHref = () => null, appRoot = null }
     compareGo.textContent = t(l, 'compareGo');
     compareClear.textContent = t(l, 'compareClear');
     filtersBar.setAttribute('aria-label', t(l, 'filtersLabel'));
+    voiceBar.setAttribute('aria-label', t(l, 'voiceLabel'));
+    hushBtn.setAttribute('aria-label', t(l, 'interrupt'));
+    hushBtn.title = t(l, 'interrupt');
+    endBtn.setAttribute('aria-label', t(l, 'voiceEnd'));
+    endBtn.title = t(l, 'voiceEnd');
     renderStatus();
     renderLauncher();
     renderFilters();
     syncCompareUI();
+    renderVoice();
+  }
+
+  // ---------- voice bar ----------
+  const VOICE_STATUS = { connecting: 'voiceConnecting', listening: 'voiceListening', thinking: 'voiceThinking', speaking: 'voiceSpeaking' };
+  function renderVoice() {
+    const l = state.lang;
+    const active = state.voice !== 'idle' && state.voice !== 'error';
+    voiceBar.hidden = !active;
+    voiceBar.dataset.state = state.muted ? 'muted' : state.voice;
+    voiceStatus.textContent = t(l, state.muted && active ? 'voiceMuted' : VOICE_STATUS[state.voice] || 'voiceIdle');
+    micBtn.classList.toggle('is-active', active);
+    micBtn.setAttribute('aria-pressed', String(active));
+    micBtn.setAttribute('aria-label', t(l, active ? 'voiceEnd' : 'voiceStart'));
+    micBtn.title = t(l, active ? 'voiceEnd' : 'voiceStart');
+    micBtn.innerHTML = active ? ICON.hangup : ICON.mic;
+    muteBtn.innerHTML = state.muted ? ICON.micOff : ICON.mic;
+    muteBtn.setAttribute('aria-pressed', String(state.muted));
+    muteBtn.setAttribute('aria-label', t(l, state.muted ? 'unmute' : 'mute'));
+    muteBtn.title = t(l, state.muted ? 'unmute' : 'mute');
+    hushBtn.hidden = state.voice !== 'speaking';
+    if (!active) voiceCaption.textContent = '';
   }
 
   // ---------- mode / focus / page lock ----------
@@ -142,6 +186,7 @@ export function initChatbot({ resolvePropertyHref = () => null, appRoot = null }
     root.dataset.mode = mode;
     panel.hidden = mode === 'closed';
     if (mode === 'open') state.unread = false;
+    if (mode === 'closed' && voice.active) voice.stop();
     lockPage(mode === 'open' && isMobile());
     renderChrome();
     if (mode === 'open') {
@@ -174,14 +219,9 @@ export function initChatbot({ resolvePropertyHref = () => null, appRoot = null }
   // ---------- persistence ----------
   function persist() {
     try {
-      sessionStorage.setItem(STORE_KEY, JSON.stringify({ lang: state.lang, filters: state.filters, messages: state.messages.slice(-MAX_STORED) }));
+      sessionStorage.setItem(STORE_KEY, JSON.stringify({ lang: state.lang, filters: state.filters, sessionId: state.sessionId, messages: state.messages.slice(-MAX_STORED) }));
     } catch { /* ignore quota / private mode */ }
   }
-  const toHistory = () =>
-    state.messages
-      .filter((m) => m.kind === 'text' || m.kind === 'results' || m.role === 'user')
-      .map((m) => ({ role: m.role, content: m.role === 'user' ? m.text : m.answer || m.text || '' }))
-      .filter((m) => m.content);
 
   // ---------- scrolling ----------
   function scrollLog(toEnd, el) {
@@ -290,15 +330,21 @@ export function initChatbot({ resolvePropertyHref = () => null, appRoot = null }
       m.hint && h('p', { class: 'cb-hint', text: m.hint }),
       h('div', { class: 'cb-chip-row' }, m.chips.map((c) => h('button', {
         type: 'button', class: 'cb-chip', text: c.label, dir: 'auto',
-        onclick: () => (c.remove ? handleSend(c.text, { filtersOverride: removeFilter(state.filters, c.remove) })
-          : c.action === 'guide' ? handleSend(c.label, { action: 'guide' }) : handleSend(c.text)),
+        onclick: () => (c.remove ? handleSend(c.text, { clear: SERVER_KEYS[c.remove] })
+          : c.action === 'voice' ? startVoice()
+            : c.action === 'guide' ? handleSend(c.label, { action: 'guide' }) : handleSend(c.text)),
       }))));
   }
 
   function buildMessage(m) {
     const lang = m.lang || state.lang;
     const wrap = h('div', { class: `cb-msg cb-msg--${m.role}`, 'data-id': m.id });
-    if (m.role === 'user') { wrap.append(bubble(m.text)); return wrap; }
+    if (m.role === 'user') {
+      const b = bubble(m.text, m.voice ? 'cb-bubble--voice' : '');
+      if (m.voice) b.setAttribute('aria-label', `${t(state.lang, 'youSaid')}: ${m.text}`);
+      wrap.append(b);
+      return wrap;
+    }
     const stack = h('div', { class: 'cb-stack' });
     wrap.append(stack);
     if (m.kind === 'welcome') {
@@ -358,7 +404,7 @@ export function initChatbot({ resolvePropertyHref = () => null, appRoot = null }
       started && h('button', { type: 'button', class: 'cb-link', text: t(state.lang, 'newSearch'), onclick: newSearch }),
       ...items.map((f) => h('button', {
         type: 'button', class: 'cb-chip cb-chip--filter', 'aria-label': t(state.lang, 'removeFilter', { x: f.label }),
-        onclick: () => !state.loading && handleSend(t(state.lang, 'removed', { x: f.label }), { filtersOverride: removeFilter(state.filters, f.key) }),
+        onclick: () => !state.loading && handleSend(t(state.lang, 'removed', { x: f.label }), { clear: SERVER_KEYS[f.key] }),
       }, h('span', { text: f.label }), h('span', { class: 'cb-x', 'aria-hidden': 'true', text: '×' }))),
     );
   }
@@ -390,6 +436,8 @@ export function initChatbot({ resolvePropertyHref = () => null, appRoot = null }
   function pushWelcome() { state.messages.push({ id: 'welcome', role: 'assistant', kind: 'welcome', showChips: true }); }
   function newSearch() {
     if (state.loading) return;
+    // Clears search filters server-side too; the customer's profile is kept.
+    resetConversation(state.sessionId);
     state.filters = {};
     state.messages = [];
     state.compare = [];
@@ -418,23 +466,37 @@ export function initChatbot({ resolvePropertyHref = () => null, appRoot = null }
     return chips.length ? { hint: t(lang, 'refineHint'), chips } : {};
   }
 
-  async function runSearch(req) {
+  const SEARCH_INTENTS = new Set(['property_search']);
+
+  // Render one agent turn (from /chat or a voice `agent_result`) into the log.
+  function pushAssistantTurn(data, lang) {
+    if (data.sessionId) state.sessionId = data.sessionId;
+    state.filters = fromServerRequirements(data.requirements);
+    renderFilters();
+    if (!data.properties.length && !SEARCH_INTENTS.has(data.intent)) {
+      return pushMessage({ role: 'assistant', kind: 'text', lang, text: data.answer || t(lang, 'foundFallback') });
+    }
+    // cited properties first, then other grounding properties, then the rest in backend (reranked) order
+    const rank = (p) => (data.cited.includes(p.id) ? 0 : data.grounding.includes(p.id) ? 1 : 2);
+    const props = data.properties.map(normalizeProperty).filter((p) => p.id)
+      .map((p, i) => ({ p, i })).sort((a, b) => rank(a.p) - rank(b.p) || a.i - b.i).map(({ p }) => ({ ...p, inAnswer: data.cited.includes(p.id) }));
+    const chips = data.degraded ? {} : buildChips(lang, state.filters, props.length === 0);
+    return pushMessage({ role: 'assistant', kind: 'results', lang, answer: data.answer, properties: props, cited: data.cited, grounding: data.grounding, ...chips });
+  }
+
+  async function runTurn(req) {
     state.loading = true;
     sendBtn.disabled = true;
     log.setAttribute('aria-busy', 'true');
     const loader = showLoader(req.lang);
     let el;
     try {
-      const payload = buildPayload({ query: req.query, requirements: req.requirements, history: toHistory() });
-      const data = await searchProperties(payload);
+      const payload = buildPayload({ query: req.query, sessionId: state.sessionId, language: req.lang, clearRequirements: req.clear });
+      const data = await sendChat(payload);
       loader.remove();
       state.health = 'up';
       renderStatus();
-      // cited properties first, then other grounding properties, then the rest in backend (reranked) order
-      const rank = (p) => (data.cited.includes(p.id) ? 0 : data.grounding.includes(p.id) ? 1 : 2);
-      const props = data.properties.map(normalizeProperty).filter((p) => p.id)
-        .map((p, i) => ({ p, i })).sort((a, b) => rank(a.p) - rank(b.p) || a.i - b.i).map(({ p }) => ({ ...p, inAnswer: data.cited.includes(p.id) }));
-      el = pushMessage({ role: 'assistant', kind: 'results', lang: req.lang, answer: data.answer, properties: props, cited: data.cited, grounding: data.grounding, ...buildChips(req.lang, state.filters, props.length === 0) });
+      el = pushAssistantTurn(data, req.lang);
     } catch (err) {
       loader.remove();
       const kind = err instanceof ApiError ? err.kind : 'server';
@@ -453,7 +515,7 @@ export function initChatbot({ resolvePropertyHref = () => null, appRoot = null }
     if (state.loading) return;
     state.messages = state.messages.filter((x) => x !== m);
     log.querySelector(`[data-id="${m.id}"]`)?.remove();
-    runSearch(m.req);
+    runTurn(m.req);
   }
 
   async function handleSend(rawText, opts = {}) {
@@ -470,26 +532,90 @@ export function initChatbot({ resolvePropertyHref = () => null, appRoot = null }
       scrollLog(true);
       return;
     }
-    const parsed = opts.filtersOverride ? {} : parseFilters(text);
-    if (!opts.filtersOverride && !Object.keys(parsed).length && text.length <= 30 && GREETING.test(normalize(text))) {
-      pushMessage({ role: 'assistant', kind: 'text', lang, text: t(lang, 'greeting'), chips: quickActions(lang) });
+    // The server keeps the conversation (requirements, selected property, booking progress),
+    // so the message is sent as typed; removing a chip names the requirement keys to clear.
+    await runTurn({ query: text, lang, clear: opts.clear || [] });
+  }
+
+  // ---------- voice ----------
+  // Spoken turns run through the same agent workflow and session as typed ones. The log shows
+  // what the customer said (transcript) and the agent's grounded reply + property cards.
+  let voiceTurn = { user: '', assistant: '', userShown: false, hadResult: false };
+  let levelFrame = 0;
+  const flushVoiceUser = () => {
+    const text = voiceTurn.user.trim();
+    if (text && !voiceTurn.userShown) {
+      pushMessage({ role: 'user', kind: 'text', text, voice: true });
+      voiceTurn.userShown = true;
       scrollLog(true);
-      return;
     }
-    const merged = opts.filtersOverride ?? mergeFilters(state.filters, parsed);
-    state.filters = merged;
-    renderFilters();
-    // The backend is stateless: carry earlier filters as readable text, and send them as structured requirements too.
-    const carried = Object.fromEntries(Object.entries(merged).filter(([k]) => !(k in parsed)));
-    const query = opts.filtersOverride
-      ? humanize(merged, lang) || t(lang, 'browseAll')
-      : [text, humanize(carried, lang)].filter(Boolean).join(' — ');
-    await runSearch({ query, requirements: toRequirements(merged), lang });
+  };
+  const voice = new VoiceSession({
+    getSessionId: () => state.sessionId,
+    setSessionId: (id) => { if (id) { state.sessionId = id; persist(); } },
+    getLang: () => state.lang,
+    onState: (s) => { state.voice = s; if (s === 'idle' || s === 'error') state.muted = false; renderVoice(); },
+    onTranscript: (role, text) => {
+      if (role === 'user') {
+        if (voiceTurn.userShown) voiceTurn = { user: '', assistant: '', userShown: false, hadResult: false };
+        voiceTurn.user += text;
+        voiceCaption.textContent = voiceTurn.user.trim();
+      } else {
+        voiceTurn.assistant += text;
+        voiceCaption.textContent = voiceTurn.assistant.trim();
+      }
+    },
+    onAgentResult: (event) => {
+      flushVoiceUser();
+      const data = parseTurn(event);
+      const el = pushAssistantTurn(data, event.language === 'ar' || event.language === 'en' ? event.language : state.lang);
+      voiceTurn.hadResult = true;
+      scrollLog(false, el);
+      if (state.mode !== 'open') { state.unread = true; renderLauncher(); }
+    },
+    onTurnComplete: () => {
+      flushVoiceUser();
+      // Small talk answered without the agent tool is only in the spoken transcript.
+      const spoken = voiceTurn.assistant.trim();
+      if (!voiceTurn.hadResult && spoken) {
+        pushMessage({ role: 'assistant', kind: 'text', lang: detectLang(spoken, state.lang), text: spoken });
+        scrollLog(true);
+      }
+      voiceTurn = { user: '', assistant: '', userShown: false, hadResult: false };
+    },
+    onError: (reason) => {
+      const retryable = reason === 'lost' || reason === 'unavailable' || reason === 'busy' || reason === 'idle' || reason === 'max_duration';
+      pushMessage({
+        role: 'assistant', kind: 'text', lang: state.lang, text: t(state.lang, `voice_${reason}`),
+        chips: retryable ? [{ label: t(state.lang, 'voiceRetry'), action: 'voice' }] : undefined,
+      });
+      scrollLog(true);
+    },
+    onLevel: (level) => {
+      cancelAnimationFrame(levelFrame);
+      levelFrame = requestAnimationFrame(() => voiceBar.style.setProperty('--cb-level', Math.min(1, level * 4).toFixed(2)));
+    },
+  });
+
+  function startVoice() {
+    if (state.mode !== 'open') setMode('open', { focus: false });
+    voiceTurn = { user: '', assistant: '', userShown: false, hadResult: false };
+    voice.start();
   }
 
   // ---------- events ----------
   launcher.addEventListener('click', () => setMode(state.mode === 'open' ? 'closed' : 'open'));
   closeBtn.addEventListener('click', () => setMode('closed'));
+  micBtn.addEventListener('click', () => (voice.active ? voice.stop() : startVoice()));
+  endBtn.addEventListener('click', () => voice.stop());
+  hushBtn.addEventListener('click', () => voice.interrupt());
+  muteBtn.addEventListener('click', () => {
+    state.muted = !state.muted;
+    voice.setMuted(state.muted);
+    renderVoice();
+  });
+  // Never leave the microphone open behind a closed panel or a navigated-away page.
+  window.addEventListener('pagehide', () => voice.stop());
   minBtn.addEventListener('click', () => setMode(state.mode === 'min' ? 'open' : 'min'));
   headMain.addEventListener('click', () => state.mode === 'min' && setMode('open'));
   langBtn.addEventListener('click', () => {

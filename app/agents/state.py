@@ -1,10 +1,26 @@
+"""Shared conversation state and the routing step of the agent graph.
+
+One ``ConversationState`` is checkpointed per conversation thread, so the
+requirements, qualification data, candidates and scheduling progress collected
+by any agent — over text, voice or WhatsApp — stay available to every other
+agent on later turns.
+"""
+
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
+
+from app.agents.understanding import (
+    classify_intent,
+    detect_language,
+    extract_qualification,
+    extract_requirements,
+    resolve_property_reference,
+)
 
 
 Channel = Literal[
@@ -28,6 +44,8 @@ class ConversationState(TypedDict, total=False):
 
     channel: Channel
     language: Language
+    # "text" or "voice" — voice replies are spoken, so agents keep them short.
+    modality: str
 
     # --------------------------------------------------------
     # Routing
@@ -35,18 +53,22 @@ class ConversationState(TypedDict, total=False):
 
     intent: str
     next_agent: str
+    active_agent: str
 
     # --------------------------------------------------------
     # Customer
     # --------------------------------------------------------
 
     customer_id: str
+    customer: dict
 
     # --------------------------------------------------------
     # Property
     # --------------------------------------------------------
 
     requirements: dict
+    # Requirement keys the client asked to drop this turn (filter chips).
+    clear_requirements: list[str]
     candidates: list[dict]
     selected_property: dict | None
 
@@ -55,48 +77,212 @@ class ConversationState(TypedDict, total=False):
     # --------------------------------------------------------
 
     qualification: dict
+    lead_id: str | None
 
     # --------------------------------------------------------
     # Scheduling
     # --------------------------------------------------------
 
+    scheduling: dict
     appointment: dict | None
 
     # --------------------------------------------------------
-    # Final response
+    # Handoff
+    # --------------------------------------------------------
+
+    handoff: dict | None
+
+    # --------------------------------------------------------
+    # Per-turn output (reset by the conversation service each turn)
     # --------------------------------------------------------
 
     response: str
+    turn_properties: list[dict]
+    cited_property_ids: list[str]
+    grounding_property_ids: list[str]
+    error: str | None
+
+
+# Scheduling stages during which short replies ("Saturday", "yes") continue the booking.
+SCHEDULING_STAGES = {"need_property", "need_date", "choose_slot", "need_contact", "confirm"}
+
+# Requirement keys translated into hard metadata filters by the RAG workflow.
+FILTER_KEYS = (
+    "property_type",
+    "district",
+    "transaction_type",
+    "bedrooms",
+    "min_bedrooms",
+    "min_price",
+    "max_price",
+)
+
+
+def merge_requirements(previous: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
+    merged = {**previous, **new}
+    if "bedrooms" in new:
+        merged.pop("min_bedrooms", None)
+    if "min_bedrooms" in new:
+        merged.pop("bedrooms", None)
+    if "max_price" in new and "min_price" not in new and merged.get("min_price", 0) >= new["max_price"]:
+        merged.pop("min_price", None)
+    if "min_price" in new and "max_price" not in new and merged.get("max_price", float("inf")) <= new["min_price"]:
+        merged.pop("max_price", None)
+    return merged
+
 
 def router(state: ConversationState) -> dict:
-    """
-    Determine the next agent to handle the conversation
-    based on the current state.
+    """Understand the latest message, update shared state and pick an intent.
+
+    Runs on every turn before any specialised agent, so all agents see the
+    same, accumulated customer requirements regardless of which one answers.
     """
 
-    query = state.get("query", "").lower()
-    if any(word in query for word in ("property", "apartment", "villa", "house", "عقار", "شقة", "فيلا")):
+    query = state.get("query", "")
+    language = detect_language(query, state.get("language") or "en")
+
+    previous_requirements = dict(state.get("requirements") or {})
+    for key in state.get("clear_requirements") or []:
+        previous_requirements.pop(key, None)
+        if key == "bedrooms":
+            previous_requirements.pop("min_bedrooms", None)
+        if key == "max_price":
+            previous_requirements.pop("min_price", None)
+    new_requirements = extract_requirements(query)
+    # A chip like "Without Sheikh Zayed" names the value being removed.
+    for key in state.get("clear_requirements") or []:
+        new_requirements.pop(key, None)
+    scheduling = state.get("scheduling") or {}
+    base = classify_intent(query)
+    if scheduling.get("stage") in SCHEDULING_STAGES and base != "property_search":
+        # Mid-booking replies (times, phone numbers, "yes") must not be read
+        # as new search filters; only an explicit new search leaves the flow.
+        new_requirements = {}
+    requirements = merge_requirements(previous_requirements, new_requirements)
+
+    signals = extract_qualification(query)
+    contact = {key: signals.pop(key) for key in ("name", "phone", "email") if key in signals}
+    qualification = {**(state.get("qualification") or {}), **signals}
+    # Mirror search requirements into the lead profile used by sales/CRM.
+    if requirements.get("district"):
+        qualification["preferred_location"] = requirements["district"]
+    if requirements.get("property_type"):
+        qualification["property_type"] = requirements["property_type"]
+    if requirements.get("max_price") and "budget" not in qualification:
+        qualification["budget"] = requirements["max_price"]
+    if requirements.get("transaction_type") == "rent" and "purpose" not in qualification:
+        qualification["purpose"] = "rent"
+    if requirements.get("delivery") and "delivery_preference" not in qualification:
+        qualification["delivery_preference"] = requirements["delivery"]
+
+    customer = {**(state.get("customer") or {}), **contact}
+
+    candidates = state.get("candidates") or []
+    # Once a property is chosen for a viewing, "the first one" refers to time slots.
+    picking_slot = scheduling.get("stage") in SCHEDULING_STAGES - {"need_property"}
+    referenced = None if picking_slot else resolve_property_reference(query, candidates)
+    selected = referenced or state.get("selected_property")
+
+    if state.get("clear_requirements"):
         intent = "property_search"
-    elif any(word in query for word in ("schedule", "appointment", "viewing", "موعد", "معاينة")):
-        intent = "scheduling"
-    elif any(word in query for word in ("budget", "timeline", "buy", "rent", "ميزانية", "شراء", "إيجار")):
-        intent = "qualification"
+    elif base == "human_handoff":
+        intent = "human_handoff"
+    elif (state.get("handoff") or {}).get("status") == "awaiting_contact" and contact.get("phone"):
+        intent = "human_handoff"
+    elif scheduling.get("stage") in SCHEDULING_STAGES and not new_requirements:
+        # Mid-booking replies ("Saturday", "4pm", "yes") belong to scheduling.
+        intent = "schedule_visit"
+    elif base in {"property_search", "conversational", "greeting"} and referenced and not new_requirements:
+        intent = "property_information"
+    elif base in {"conversational", "greeting", "lead_qualification"} and new_requirements:
+        intent = "property_search"
+    elif base in {"investment", "sales"} and {"property_type", "district"} & new_requirements.keys():
+        # "apartment in New Cairo for investment" is a search; the purpose
+        # is already captured in the qualification profile above.
+        intent = "property_search"
+    elif base == "conversational" and (signals or contact):
+        intent = "lead_qualification"
+    elif base == "property_search" and not requirements and not candidates:
+        # "I'm looking for a property" — collect requirements first.
+        intent = "lead_qualification"
     else:
-        intent = "conversational"
-    return {"intent": intent}
+        intent = base
+
+    return {
+        "intent": intent,
+        "language": language,
+        "requirements": requirements,
+        "clear_requirements": [],
+        "qualification": qualification,
+        "customer": customer,
+        "selected_property": selected,
+    }
+
+
+INTENT_TO_AGENT = {
+    "property_search": "property",
+    "property_information": "property",
+    "project_information": "property",
+    "availability": "property",
+    "payment_plan": "sales",
+    "investment": "sales",
+    "sales": "sales",
+    "schedule_visit": "scheduling",
+    "lead_qualification": "qualification",
+    "human_handoff": "handoff",
+}
+
 
 def route_agent(state: ConversationState) -> str:
+    return INTENT_TO_AGENT.get(state.get("intent", ""), "conversational")
 
 
-    intent = state.get("intent")
+# ---------------------------------------------------------------------------
+# Helpers shared by agent nodes
+# ---------------------------------------------------------------------------
 
-    if intent == "property_search":
-        return "property"
 
-    if intent == "qualification":
-        return "qualification"
+def conversation_history(state: ConversationState, limit: int = 8) -> list[dict[str, str]]:
+    """Recent user/assistant turns (excluding the current one) for grounding."""
+    history: list[dict[str, str]] = []
+    for message in (state.get("messages") or [])[:-1][-limit:]:
+        role = {"human": "user", "ai": "assistant"}.get(getattr(message, "type", ""))
+        content = getattr(message, "content", "")
+        if role and isinstance(content, str) and content.strip():
+            history.append({"role": role, "content": content})
+    return history
 
-    if intent == "scheduling":
-        return "scheduling"
 
-    return "conversational"
+def property_label(item: dict | None) -> str:
+    if not item:
+        return ""
+    metadata = item.get("metadata") or {}
+    kind = metadata.get("property_type") or metadata.get("type")
+    place = metadata.get("district") or metadata.get("location") or metadata.get("location_district")
+    description = " — ".join(str(part) for part in (kind, place) if part)
+    return f"{description} (ID {item.get('property_id')})" if description else f"ID {item.get('property_id')}"
+
+
+def describe_requirements(requirements: dict[str, Any], qualification: dict[str, Any], language: str) -> str:
+    ar = language == "ar"
+    parts: list[str] = []
+    if requirements.get("property_type"):
+        parts.append(str(requirements["property_type"]))
+    if requirements.get("district"):
+        parts.append(("في " if ar else "in ") + str(requirements["district"]))
+    if requirements.get("bedrooms"):
+        parts.append(f"{requirements['bedrooms']} " + ("غرف" if ar else "bedrooms"))
+    if requirements.get("min_bedrooms"):
+        parts.append(f"{requirements['min_bedrooms']}+ " + ("غرف" if ar else "bedrooms"))
+    budget = requirements.get("max_price") or qualification.get("budget")
+    if budget:
+        parts.append(("ميزانية حتى " if ar else "budget up to ") + f"{budget:,.0f} EGP")
+    if qualification.get("down_payment"):
+        parts.append(("مقدم " if ar else "down payment ") + f"{qualification['down_payment']:,.0f} EGP")
+    if qualification.get("monthly_installment"):
+        parts.append(("قسط شهري " if ar else "monthly ") + f"{qualification['monthly_installment']:,.0f} EGP")
+    if qualification.get("purpose"):
+        parts.append(str(qualification["purpose"]))
+    if qualification.get("timeline"):
+        parts.append(str(qualification["timeline"]))
+    return "، ".join(parts) if ar else ", ".join(parts)

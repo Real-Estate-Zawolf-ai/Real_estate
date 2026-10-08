@@ -1,8 +1,6 @@
 import logging
 from pathlib import Path
 
-from unstructured.partition.auto import partition
-
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +25,10 @@ def parse_office(file_path: str) -> str:
             raise ValueError(
                 f"Unsupported Office format: {path.suffix}"
             )
+
+        # Imported lazily: importing unstructured is slow (and can block on
+        # first-run downloads), which must not delay API startup.
+        from unstructured.partition.auto import partition
 
         elements = partition(filename=str(path))
 

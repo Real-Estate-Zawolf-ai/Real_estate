@@ -7,9 +7,10 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from starlette.concurrency import run_in_threadpool
 
+from app.api.security import require_admin
 from app.helpers.config import get_settings
 from app.rag.ingestion.pipeline import ingest_file, is_supported
 from app.workflows.rag import chunks_from_ingestion, index_chunks
@@ -18,7 +19,7 @@ from app.workflows.rag import chunks_from_ingestion, index_chunks
 router = APIRouter(prefix="/documents", tags=["documents"])
 
 
-@router.post("/ingest", status_code=status.HTTP_201_CREATED)
+@router.post("/ingest", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_admin)])
 async def ingest_document(file: UploadFile = File(...)) -> dict[str, Any]:
     filename = Path(file.filename or "upload").name
     if not is_supported(filename):

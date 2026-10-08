@@ -1,8 +1,9 @@
 """Development property-catalogue endpoints."""
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from starlette.concurrency import run_in_threadpool
 
+from app.api.security import require_admin
 from app.schemas.property import PropertyRecord, PropertySearchRequest, PropertySearchResponse
 from app.workflows.rag import index_chunks, list_indexed_properties, search_index
 
@@ -18,7 +19,7 @@ async def list_properties() -> list[dict]:
         raise HTTPException(status_code=503, detail="Property catalogue is unavailable") from error
 
 
-@router.post("", response_model=dict, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=dict, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_admin)])
 async def add_property(property_record: PropertyRecord) -> dict:
     record = property_record.model_dump(exclude_none=True)
     metadata = {**record.get("metadata", {}), **{k: v for k, v in record.items() if k not in {"metadata", "text"}}}

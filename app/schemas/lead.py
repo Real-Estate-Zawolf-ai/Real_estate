@@ -30,3 +30,5 @@ class LeadCaptureRequest(BaseModel):
     phone: str = Field(min_length=3, max_length=30)
     message: str = Field(default="", max_length=2_000)
     property: str | None = Field(default=None, max_length=100)
+    # Signed chat session id, when the visitor used the assistant first.
+    session_id: str | None = Field(default=None, max_length=100)

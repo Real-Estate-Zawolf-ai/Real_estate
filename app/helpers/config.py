@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -25,6 +25,37 @@ class Settings(BaseSettings):
     APP_VERSION: str = "0.1.0"
     PRIMARY_LANG: str = "en"
     DEFAULT_LANG: str = "en"
+
+    # Comma-separated browser origins allowed for CORS and the voice
+    # WebSocket. "*" keeps local development open; set real origins in prod.
+    CORS_ALLOWED_ORIGINS: str = "*"
+
+    # HMAC key for website session ids and voice tokens. When unset a random
+    # per-process key is used, so sessions do not survive a restart.
+    SESSION_SECRET: str | None = None
+
+    # Required (X-Admin-Key header) for endpoints that write to the property
+    # index: POST /properties and POST /documents/ingest. Unset = disabled.
+    ADMIN_API_KEY: str | None = None
+
+    # -----------------------------------------------------------------------
+    # Voice (website, Gemini Live)
+    # -----------------------------------------------------------------------
+
+    VOICE_TOKEN_TTL_SECONDS: int = 60
+    VOICE_MAX_SESSION_SECONDS: int = 600
+    VOICE_IDLE_TIMEOUT_SECONDS: int = 90
+    VOICE_MAX_CONCURRENT_SESSIONS: int = 20
+    VOICE_MAX_FRAME_BYTES: int = 64_000
+
+    # -----------------------------------------------------------------------
+    # Scheduling
+    # -----------------------------------------------------------------------
+
+    VIEWING_TIMEZONE: str = "Africa/Cairo"
+    VIEWING_DAY_START_HOUR: int = 10
+    VIEWING_DAY_END_HOUR: int = 18
+    VIEWING_SLOT_MINUTES: int = 60
 
     # -----------------------------------------------------------------------
     # Generation / LLM
@@ -83,6 +114,8 @@ class Settings(BaseSettings):
     WHATSAPP_PHONE_NUMBER_ID: str | None = None
     WHATSAPP_API_VERSION: str = "v23.0"
     WHATSAPP_TRANSCRIPTION_MODEL: str = "whisper-large-v3-turbo"
+    # Shared bearer secret for the optional open-wa gateway (channels/whatsapp.ts).
+    WHATSAPP_GATEWAY_SECRET: str | None = None
 
     # -----------------------------------------------------------------------
     # PostgreSQL
@@ -110,6 +143,17 @@ class Settings(BaseSettings):
     FILE_MAX_SIZE: int | None = None
     FILE_DEFAULT_CHUNK_SIZE: int = 1500
     FILE_CHUNK_OVERLAP: int = 100
+
+
+    @field_validator("FILE_MAX_SIZE", "POSTGRES_PORT", mode="before")
+    @classmethod
+    def blank_is_unset(cls, value: object) -> object:
+        # ".env.example" ships blank optional numbers ("FILE_MAX_SIZE=").
+        return None if isinstance(value, str) and not value.strip() else value
+
+    @property
+    def cors_origins(self) -> list[str]:
+        return [origin.strip().rstrip("/") for origin in self.CORS_ALLOWED_ORIGINS.split(",") if origin.strip()]
 
 
 @lru_cache(maxsize=1)

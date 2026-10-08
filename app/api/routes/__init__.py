@@ -5,6 +5,7 @@ from .documents import router as documents_router
 from .leads import router as leads_router
 from .properties import router as properties_router
 from .voice import router as voice_router
+from .webhooks import gateway_router as whatsapp_gateway_router
 from .webhooks import router as webhooks_router
 
 __all__ = [
@@ -14,4 +15,5 @@ __all__ = [
     "properties_router",
     "voice_router",
     "webhooks_router",
+    "whatsapp_gateway_router",
 ]

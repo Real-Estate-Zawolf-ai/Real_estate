@@ -1,4 +1,5 @@
-// API layer: no DOM, no UI state. The backend is the source of truth for properties and answers.
+// API layer: no DOM, no UI state. The backend is the source of truth for properties, answers
+// and the conversation itself (requirements, selection, bookings live server-side per session).
 import { CONFIG } from './config.js';
 
 export class ApiError extends Error {
@@ -9,30 +10,18 @@ export class ApiError extends Error {
   }
 }
 
-export function buildPayload({ query, requirements, history }) {
-  const payload = {
-    query: String(query).trim().slice(0, 2000),
-    requirements: requirements || {},
-    top_k: CONFIG.topK,
-    retrieval_top_k: CONFIG.retrievalTopK,
-  };
-  // Ready for multi-turn backends: flip SEND_HISTORY in runtime-config.js.
-  if (CONFIG.sendHistory && history?.length) payload.history = history.slice(-CONFIG.maxHistoryTurns * 2);
-  return payload;
-}
-
 const ids = (v) => (Array.isArray(v) ? v.map(String) : []);
 
-export async function searchProperties(payload, { timeoutMs = CONFIG.timeoutMs } = {}) {
+async function postJson(path, body, { timeoutMs = CONFIG.timeoutMs } = {}) {
   const ctrl = new AbortController();
   let timedOut = false;
   const timer = setTimeout(() => { timedOut = true; ctrl.abort(); }, timeoutMs);
   let res;
   try {
-    res = await fetch(CONFIG.apiBase + CONFIG.ragPath, {
+    res = await fetch(CONFIG.apiBase + path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(body),
       signal: ctrl.signal,
     });
   } catch {
@@ -41,14 +30,44 @@ export async function searchProperties(payload, { timeoutMs = CONFIG.timeoutMs }
     clearTimeout(timer);
   }
   if (!res.ok) throw new ApiError(res.status === 422 ? 'invalid' : 'server', res.status);
-  let data;
-  try { data = await res.json(); } catch { throw new ApiError('server', res.status); }
+  try { return await res.json(); } catch { throw new ApiError('server', res.status); }
+}
+
+export function buildPayload({ query, sessionId, language, clearRequirements }) {
+  const payload = { query: String(query).trim().slice(0, 2000) };
+  if (sessionId) payload.session_id = sessionId;
+  if (language === 'ar' || language === 'en') payload.language = language;
+  if (clearRequirements?.length) payload.clear_requirements = clearRequirements;
+  return payload;
+}
+
+// Normalizes /chat responses and voice `agent_result` events (same shape).
+export function parseTurn(data) {
   return {
-    answer: typeof data?.answer === 'string' ? data.answer.trim() : '',
+    sessionId: typeof data?.session_id === 'string' ? data.session_id : null,
+    intent: String(data?.intent || ''),
+    answer: typeof data?.response === 'string' ? data.response.trim() : '',
     cited: ids(data?.cited_property_ids),
     grounding: ids(data?.grounding_property_ids),
-    properties: Array.isArray(data?.properties) ? data.properties : [],
+    properties: Array.isArray(data?.candidates) ? data.candidates : Array.isArray(data?.properties) ? data.properties : [],
+    requirements: data?.requirements && typeof data.requirements === 'object' ? data.requirements : {},
+    appointment: data?.appointment || null,
+    handoff: data?.handoff || null,
+    degraded: data?.degraded === true || !!data?.error,
   };
+}
+
+export async function sendChat(payload, opts) {
+  return parseTurn(await postJson(CONFIG.chatPath, payload, opts));
+}
+
+export async function resetConversation(sessionId) {
+  if (!sessionId) return;
+  try { await postJson(CONFIG.resetPath, { session_id: sessionId }, { timeoutMs: 8000 }); } catch { /* best effort */ }
+}
+
+export async function requestVoiceToken({ sessionId, language }) {
+  return postJson(CONFIG.voiceTokenPath, { session_id: sessionId || null, language }, { timeoutMs: 10000 });
 }
 
 export async function checkHealth(timeoutMs = 4000) {

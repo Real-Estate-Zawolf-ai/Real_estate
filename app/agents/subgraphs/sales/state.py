@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import logging
 from typing import Literal
 
-from app.agents.state import ConversationState
+from app.agents.messages import say
+from app.agents.state import ConversationState, conversation_history
+from app.agents.subgraphs.property.state import search_filters
 from app.agents.tools.crm import crm_service
+
+
+logger = logging.getLogger(__name__)
 
 
 SalesIntent = Literal[
@@ -102,7 +108,7 @@ def understand_sales_intent(
         sales_intent = "price_inquiry"
     elif any(word in normalized for word in ("offer", "discount", "عرض", "خصم")):
         sales_intent = "offer_inquiry"
-    elif any(word in normalized for word in ("buy", "reserve", "شراء", "احجز")):
+    elif any(word in normalized for word in ("buy", "reserve", "شراء", "احجز", "اشتري")):
         sales_intent = "purchase_intent"
     else:
         sales_intent = "sales_inquiry"
@@ -181,12 +187,56 @@ def generate_sales_response(
     Generate a grounded sales response.
     """
 
+    from app.workflows.rag import answer_about_properties, answer_query
+
+    language = state.get("language", "en")
     action = state.get("next_action", "continue_sales_conversation")
-    selected = state.get("selected_property") or {}
-    property_id = selected.get("property_id") or selected.get("id")
-    subject = f" for property {property_id}" if property_id else ""
-    response = f"I can help with {action.replace('_', ' ')}{subject}."
+    selected = state.get("selected_property")
+    candidates = state.get("candidates") or []
+    history = conversation_history(state)
+    requirements = state.get("requirements") or {}
+
+    try:
+        # Prices, payment plans and offers are answered only from listing
+        # evidence; the generator refuses to calculate or invent them.
+        if selected or candidates:
+            result = answer_about_properties(
+                state.get("query", ""),
+                [selected] if selected else candidates[:5],
+                requirements,
+                conversation_history=history,
+            )
+        else:
+            result = answer_query(
+                state.get("query", ""),
+                search_filters(requirements),
+                conversation_history=history,
+            )
+    except Exception as error:
+        logger.exception("Sales workflow failed")
+        return {
+            "response": say(language, "search_unavailable"),
+            "error": f"sales_unavailable: {type(error).__name__}",
+            "active_agent": "sales",
+        }
+
+    response = result["answer"]
+    update: dict = {}
+    if not (selected or candidates):
+        # This turn ran a search: keep the results so "the first one" works next.
+        update["candidates"] = result["properties"]
+    customer_id = state.get("customer_id")
+    if action in {"move_to_conversion", "provide_offer"}:
+        response = f"{response}\n\n{say(language, 'sales_handoff_offer')}"
+        if customer_id:
+            update["lead_id"] = crm_service.ensure_lead(customer_id, source=state.get("channel", "website"))
+            crm_service.update_lead(customer_id, {"status": "hot", "sales_intent": state.get("sales_intent")})
 
     return {
         "response": response,
+        "turn_properties": result["properties"],
+        "cited_property_ids": result["cited_property_ids"],
+        "grounding_property_ids": result["grounding_property_ids"],
+        "active_agent": "sales",
+        **update,
     }

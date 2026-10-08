@@ -24,13 +24,18 @@ from .api.routes import (
     properties_router,
     voice_router,
     webhooks_router,
+    whatsapp_gateway_router,
 )
+from prometheus_client import make_asgi_app
 from starlette.concurrency import run_in_threadpool
 
 from .database.vector_db import create_client
+from .helpers.config import get_settings
+from .observability import configure_logging
 from .workflows.rag import answer_query
 
 
+configure_logging()
 logger = logging.getLogger(__name__)
 
 
@@ -49,14 +54,14 @@ app = FastAPI(
 # CORS
 # ---------------------------------------------------------------------------
 
-# Keep browser clients usable during early development.
-# Restrict this list to the deployed frontend origins before production.
+# CORS_ALLOWED_ORIGINS defaults to "*" for local development; set it to the
+# deployed frontend origins in production (also enforced on the voice socket).
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=get_settings().cors_origins,
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type", "Accept"],
 )
 
 
@@ -66,6 +71,7 @@ app.add_middleware(
 
 app.include_router(voice_router)
 app.include_router(webhooks_router)
+app.include_router(whatsapp_gateway_router)
 app.include_router(chat_router)
 app.include_router(properties_router)
 app.include_router(documents_router)
@@ -77,6 +83,8 @@ app.include_router(leads_router)
 # ---------------------------------------------------------------------------
 
 FRONTEND_DIR = Path(__file__).parent / "frontend"
+
+app.mount("/metrics", make_asgi_app())
 
 if FRONTEND_DIR.exists():
     app.mount(

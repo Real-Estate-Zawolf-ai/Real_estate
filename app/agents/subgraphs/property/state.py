@@ -1,7 +1,20 @@
 from __future__ import annotations
 
-from app.agents.state import ConversationState
-from app.agents.tools.property import property_search_service
+import logging
+
+from app.agents.messages import say
+from app.agents.state import (
+    FILTER_KEYS,
+    ConversationState,
+    conversation_history,
+    describe_requirements,
+)
+
+
+logger = logging.getLogger(__name__)
+
+# Intents answered from the already-selected listing rather than a new search.
+DETAIL_INTENTS = {"property_information", "availability", "project_information"}
 
 
 class PropertyState(
@@ -39,132 +52,65 @@ class PropertyState(
     response: str
 
 
+def search_filters(requirements: dict) -> dict:
+    """Hard metadata filters understood by ``build_metadata_filter``."""
+    return {key: requirements[key] for key in FILTER_KEYS if requirements.get(key) not in (None, "")}
+
+
+def rewrite_query(state: PropertyState) -> str:
+    """Carry earlier requirements into the retrieval query text."""
+    query = state.get("query", "").strip()
+    carried = describe_requirements(state.get("requirements") or {}, {}, "en")
+    return f"{query} — {carried}" if carried and carried.lower() not in query.lower() else query
+
+
 def run_property_workflow(state: PropertyState) -> dict:
     """Execute the same RAG workflow used by HTTP and channel adapters."""
-    from app.workflows.rag import answer_query
+    from app.workflows.rag import answer_about_properties, answer_query
 
-    result = answer_query(
-        state.get("query", ""),
-        state.get("requirements", {}),
-    )
+    language = state.get("language", "en")
+    requirements = state.get("requirements") or {}
+    history = conversation_history(state)
+    selected = state.get("selected_property")
+
+    try:
+        if state.get("intent") in DETAIL_INTENTS and selected:
+            result = answer_about_properties(
+                state.get("query", ""),
+                [selected],
+                requirements,
+                conversation_history=history,
+            )
+            return {
+                "response": result["answer"],
+                "turn_properties": result["properties"],
+                "cited_property_ids": result["cited_property_ids"],
+                "grounding_property_ids": result["grounding_property_ids"],
+                "active_agent": "property",
+            }
+
+        rewritten = rewrite_query(state)
+        result = answer_query(
+            rewritten,
+            search_filters(requirements),
+            conversation_history=history,
+        )
+    except Exception as error:  # provider, vector DB or timeout failures
+        logger.exception("Property workflow failed")
+        return {
+            "response": say(language, "search_unavailable"),
+            "error": f"property_search_unavailable: {type(error).__name__}",
+            "active_agent": "property",
+        }
+
     return {
+        "rewritten_query": rewritten,
         "response": result["answer"],
         "candidates": result["properties"],
-    }
-
-
-def extract_requirements(
-    state: PropertyState,
-) -> dict:
-    """
-    Extract structured property requirements
-    from the user's query.
-    """
-
-    query = state.get("query", "")
-
-    requirements = property_search_service.extract_requirements(query)
-
-    return {
-        "requirements": requirements,
-    }
-
-
-def rewrite_query(
-    state: PropertyState,
-) -> dict:
-    """
-    Rewrite the user's query into a retrieval-friendly query.
-    """
-
-    query = state.get("query", "")
-
-    requirements = state.get(
-        "requirements",
-        {},
-    )
-
-    rewritten_query = property_search_service.rewrite_query(query, requirements)
-
-    return {
-        "rewritten_query": rewritten_query,
-    }
-
-
-def retrieve_properties(
-    state: PropertyState,
-) -> dict:
-    """
-    Retrieve candidate properties using
-    the property search service.
-    """
-
-    query = state.get(
-        "rewritten_query",
-        state.get("query", ""),
-    )
-
-    requirements = state.get(
-        "requirements",
-        {},
-    )
-
-    candidates = property_search_service.search(
-        query=query,
-        filters=requirements,
-    )
-
-    return {
-        "candidates": candidates,
-    }
-
-
-def select_property(
-    state: PropertyState,
-) -> dict:
-    """
-    Select the most relevant property from
-    the retrieved candidates.
-    """
-
-    candidates = state.get(
-        "candidates",
-        [],
-    )
-
-    if not candidates:
-        return {
-            "selected_property": None,
-        }
-
-    selected_property = property_search_service.select(
-        candidates,
-        state.get("requirements", {}),
-    )
-
-    return {
-        "selected_property": selected_property,
-    }
-
-
-def generate_property_response(
-    state: PropertyState,
-) -> dict:
-    """
-    Generate the final grounded response.
-    """
-
-    selected_property = state.get(
-        "selected_property"
-    )
-
-    if not selected_property:
-        return {
-            "response": "No suitable property found."
-        }
-
-    response = property_search_service.format_response(selected_property)
-
-    return {
-        "response": response,
+        "turn_properties": result["properties"],
+        "cited_property_ids": result["cited_property_ids"],
+        "grounding_property_ids": result["grounding_property_ids"],
+        # A new result list invalidates the previous selection.
+        "selected_property": None,
+        "active_agent": "property",
     }

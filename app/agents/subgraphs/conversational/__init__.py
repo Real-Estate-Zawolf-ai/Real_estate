@@ -1,3 +1,5 @@
-from .agent import conversational_agent
+"""General conversation (greetings, help) agent subgraph."""
 
-__all__ = ["conversational_agent"]
+from .graph import conversational_graph
+
+__all__ = ["conversational_graph"]

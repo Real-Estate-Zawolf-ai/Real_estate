@@ -16,7 +16,7 @@ class LLMClient:
     ):
         settings = get_settings()
         self.client = Groq(api_key=api_key or settings.GROQ_API_KEY)
-        self.model = model or settings.GENERATION_MODEL_ID or settings.GROQ_MODEL
+        self.model = model or settings.GENERATION_MODEL or settings.GROQ_MODEL
 
     def generate(
         self,
