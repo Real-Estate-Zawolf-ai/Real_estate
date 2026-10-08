@@ -72,6 +72,17 @@ class RagStub:
 
 
 @pytest.fixture(autouse=True)
+def offline_conversational_llm(monkeypatch):
+    """Small talk uses the deterministic fallback reply unless a test opts in."""
+    from app.agents.subgraphs.conversational import graph as conversational
+
+    def unavailable():
+        raise RuntimeError("Conversational LLM is disabled in tests")
+
+    monkeypatch.setattr(conversational, "_get_llm_client", unavailable)
+
+
+@pytest.fixture(autouse=True)
 def fresh_booking_calendar():
     """Each test starts with no viewing bookings (the store is process-global)."""
     from app.agents.tools.scheduling import scheduling_service

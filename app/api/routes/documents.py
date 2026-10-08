@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from starlette.concurrency import run_in_threadpool
 
 from app.api.security import require_admin
@@ -20,10 +20,15 @@ router = APIRouter(prefix="/documents", tags=["documents"])
 
 
 @router.post("/ingest", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_admin)])
-async def ingest_document(file: UploadFile = File(...)) -> dict[str, Any]:
+async def ingest_document(
+    file: UploadFile = File(...),
+    image_kind: str | None = Form(default=None),
+) -> dict[str, Any]:
     filename = Path(file.filename or "upload").name
     if not is_supported(filename):
         raise HTTPException(status_code=415, detail="Unsupported document type")
+    if image_kind is not None and image_kind not in {"photo", "floorplan"}:
+        raise HTTPException(status_code=400, detail="image_kind must be 'photo' or 'floorplan'")
 
     content = await file.read()
     max_size = get_settings().FILE_MAX_SIZE
@@ -39,7 +44,10 @@ async def ingest_document(file: UploadFile = File(...)) -> dict[str, Any]:
         result = await run_in_threadpool(
             ingest_file,
             temporary_path,
-            extra_metadata={"original_file_name": filename},
+            extra_metadata={
+                "original_file_name": filename,
+                **({"image_kind": image_kind} if image_kind else {}),
+            },
         )
         try:
             indexed_count = await run_in_threadpool(
