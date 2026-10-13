@@ -6,7 +6,7 @@
 #
 # Free-tier facts this file is built around:
 #   * 512 MB RAM, one instance          -> lean image, 1 uvicorn worker
-#   * sleeps after 15 min without HTTP  -> a free uptime monitor pings /health
+#   * sleeps after 15 min without HTTP  -> expect a ~50 s first request after idle (no keep-alive pings)
 #   * no pre-deploy command on free     -> scripts/start.sh migrates, then serves
 #   * free Postgres expires after 30 d  -> the database lives on Neon instead
 services:

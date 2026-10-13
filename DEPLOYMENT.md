@@ -82,7 +82,7 @@ The blueprint already sets `APP_ENV=production`, `TRUSTED_PROXY_HOPS=1`, `LOG_FO
 
 4. Deploy. On start the container validates the configuration (a bad one stops the deploy with a list of what is wrong, never the values), applies migrations, then serves. Watch the logs for `Database schema at …`, `Conversation-memory tables ready`, `Startup complete`.
 
-**Keep it awake (optional but recommended):** free instances sleep after 15 minutes and the first visitor then waits ~50 s. Create a free monitor at <https://uptimerobot.com> hitting `https://<service>.onrender.com/health` every 5 minutes. That uses roughly 730 of your 750 monthly free hours for one service, which is fine. A slow first request shows the chat's "taking longer than expected" message (the client waits up to 60 s).
+**Cold starts:** free instances sleep after 15 minutes without traffic and the first visitor then waits ~50 s (the chat shows its "taking longer than expected" message and the client waits up to 60 s). This deployment deliberately adds no keep-alive pings; an always-on instance would be a paid plan, so that is your decision.
 
 ## 6. Cloudflare Pages (the website)
 
@@ -129,7 +129,7 @@ Limits to know: free-form replies work inside 24 hours of the customer's last me
 ## 10. Known limits (be honest with yourself about these)
 
 * **One instance.** Rate limits and open voice calls are per process. Scaling out is safe for data (all state is in PostgreSQL, turns are locked across workers) but limits become per-instance.
-* **Cold starts.** Without the uptime monitor the first visitor after 15 idle minutes waits ~50 s; Neon and Qdrant add a few seconds when idle.
+* **Cold starts.** The first visitor after 15 idle minutes waits ~50 s; Neon and Qdrant add a few seconds when idle.
 * **Gemini Live is a preview model** (`gemini-3.1-flash-live-preview`); Google may change or retire it. Voice quality and phone-number dictation depend on it. Text chat is unaffected if it fails.
 * **Voice sessions are capped** at 10 minutes, 20 concurrent, 3 per client.
 * **Booking confirmation is human.** The assistant records a *request*; an advisor must confirm it. It never tells a customer a visit is confirmed.
