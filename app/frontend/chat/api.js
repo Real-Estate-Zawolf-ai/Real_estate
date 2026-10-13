@@ -67,7 +67,8 @@ export async function resetConversation(sessionId) {
 }
 
 export async function requestVoiceToken({ sessionId, language }) {
-  return postJson(CONFIG.voiceTokenPath, { session_id: sessionId || null, language }, { timeoutMs: 10000 });
+  // A sleeping free-tier API needs up to ~50 s to wake, so wait as long as a chat message does.
+  return postJson(CONFIG.voiceTokenPath, { session_id: sessionId || null, language }, { timeoutMs: CONFIG.timeoutMs });
 }
 
 export async function checkHealth(timeoutMs = 4000) {

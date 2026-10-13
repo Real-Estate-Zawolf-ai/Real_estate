@@ -96,6 +96,7 @@ html.cb-lock{overflow:hidden}
 .cb-prop-tags{display:flex;flex-wrap:wrap;gap:6px}
 .cb-tag{padding:2px 8px;border-radius:999px;background:var(--cb-sand);font-size:.74rem;font-weight:700;color:var(--cb-ink)}
 .cb-tag--ref{background:var(--cb-accent-dark);color:#fff}
+.cb-tag--demo{background:#fff3cd;color:#664d03;border:1px solid #e6c76a}
 .cb-prop-title{margin:0;font:600 1.02rem/1.25 'Playfair Display',Georgia,serif;overflow-wrap:anywhere}
 .cb-prop-loc{margin:0;font-size:.85rem;color:var(--cb-stone)}
 .cb-prop-price{margin:2px 0 0;font-weight:700;font-size:1.05rem;text-align:start}

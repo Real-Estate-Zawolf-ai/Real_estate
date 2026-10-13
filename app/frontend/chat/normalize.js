@@ -51,6 +51,7 @@ export function normalizeProperty(p) {
     url: safeUrl(first(meta, ['url', 'link', 'listing_url', 'property_url'])),
     description: desc ? truncate(desc, 600) : text ? truncate(text, 600) : undefined,
     source: typeof p?.source_file === 'string' && p.source_file ? p.source_file.split(/[\\/]/).pop() : undefined,
+    isDemo: p?.metadata?.is_demo === true,
     inAnswer: false,
   };
 }

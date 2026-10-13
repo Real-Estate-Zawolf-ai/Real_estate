@@ -136,3 +136,63 @@ def test_voice_connections_are_rate_limited_and_capped_per_client(client, fake_l
     with pytest.raises(WebSocketDisconnect):
         with connect(client, tokens[2]) as third:
             third.receive()
+
+
+def _provider_fails(monkeypatch, error):
+    """Every attempt to open a Gemini Live session raises ``error``; returns the attempt list."""
+    from contextlib import asynccontextmanager
+
+    import app.channels.website as website
+
+    attempts = []
+
+    @asynccontextmanager
+    async def connect(system_instruction=None, **_):
+        attempts.append(1)
+        raise error
+        yield  # pragma: no cover - makes this an async generator
+
+    monkeypatch.setattr(website, "connect_live_session", connect)
+    return attempts
+
+
+def test_gemini_quota_error_is_reported_as_busy_and_not_retried(client, monkeypatch, settings_env):
+    """A 429 from Gemini used to look like 'the connection dropped' and was retried, burning more quota."""
+    settings_env(VOICE_RECONNECT_BACKOFF_SECONDS="0")
+    attempts = _provider_fails(monkeypatch, RuntimeError("429 RESOURCE_EXHAUSTED: quota exceeded for this model"))
+    token = voice_token(client)["token"]
+
+    with connect(client, token) as ws:
+        event = json.loads(ws.receive()["text"])
+
+    assert event["type"] == "error" and event["code"] == "busy"
+    assert len(attempts) == 1
+    assert "RESOURCE_EXHAUSTED" not in json.dumps(event)  # provider detail stays in the server log
+
+
+def test_other_provider_failures_are_still_retried_then_reported_as_disconnected(client, monkeypatch, settings_env):
+    settings_env(VOICE_RECONNECT_BACKOFF_SECONDS="0", VOICE_MAX_PROVIDER_RECONNECTS="2")
+    attempts = _provider_fails(monkeypatch, ConnectionError("network unreachable"))
+    token = voice_token(client)["token"]
+
+    with connect(client, token) as ws:
+        frames = receive_until(ws, "error")
+
+    assert frames[-1][1]["code"] == "provider_disconnected"
+    assert len(attempts) == 3  # first try + 2 reconnects
+
+
+@pytest.mark.parametrize(
+    "error, expected",
+    [
+        (RuntimeError("429 RESOURCE_EXHAUSTED"), True),
+        (RuntimeError("Resource has been exhausted (e.g. check quota)."), True),
+        (type("QuotaError", (Exception,), {"code": 429})(), True),
+        (ConnectionError("connection reset"), False),
+        (ValueError("model not found"), False),
+    ],
+)
+def test_quota_errors_are_recognised(error, expected):
+    from app.channels.website import is_provider_quota_error
+
+    assert is_provider_quota_error(error) is expected

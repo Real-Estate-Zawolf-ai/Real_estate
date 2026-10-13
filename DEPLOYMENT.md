@@ -45,6 +45,10 @@ export QDRANT_URL=... QDRANT_API_KEY=... GEMINI_API_KEY=...
 python scripts/ingest.py data/raw --recursive --rebuild
 ```
 
+**Test data is hidden from visitors.** Listings ingested from a file whose *name* contains `test_`, `demo` or `sample` (for example `test_properties_small.csv`) are treated as demo data: the website, search and the assistant do not show them. To present them on purpose (a demo), set `SHOW_DEMO_LISTINGS=true` on Render; every such listing then carries a visible "Demo listing — not for sale" label, and the site shows a demo banner. Turn it off, and ingest real listings from a normally named file, before real customers use the site. Change the markers with `DEMO_SOURCE_MARKERS`.
+
+The website loads up to 500 listings (the first 500 in the collection); beyond that, search through the assistant.
+
 Embeddings are Gemini `gemini-embedding-001` at 768 dimensions. **Queries and documents must use the same model and dimension**; the API refuses to search a collection built differently and `/health/ready` says so. Changing the embedding model means re-ingesting into a fresh collection.
 
 ## 3. API keys

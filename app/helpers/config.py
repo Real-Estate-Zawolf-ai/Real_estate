@@ -108,6 +108,17 @@ class Settings(BaseSettings):
     BOOKING_HOLD_TTL_HOURS: int = 24
 
     # -----------------------------------------------------------------------
+    # Demo listings
+    # -----------------------------------------------------------------------
+    # Listings ingested from a file whose name contains one of DEMO_SOURCE_MARKERS
+    # (test_properties.csv, demo_*.xlsx, ...) are TEST data, not inventory. They are
+    # hidden from the public catalogue and from the assistant's answers unless this is
+    # switched on explicitly; when it is, every such listing is returned with
+    # ``is_demo: true`` so the website labels it as a demo. Real listings are unaffected.
+    SHOW_DEMO_LISTINGS: bool = False
+    DEMO_SOURCE_MARKERS: str = "test_,demo,sample"
+
+    # -----------------------------------------------------------------------
     # Staff notifications (any combination; all optional)
     # -----------------------------------------------------------------------
 
@@ -262,6 +273,10 @@ class Settings(BaseSettings):
         return [origin.strip().rstrip("/") for origin in self.CORS_ALLOWED_ORIGINS.split(",") if origin.strip()]
 
     @property
+    def demo_markers(self) -> list[str]:
+        return [marker.strip().lower() for marker in self.DEMO_SOURCE_MARKERS.split(",") if marker.strip()]
+
+    @property
     def docs_enabled(self) -> bool:
         return self.ENABLE_API_DOCS if self.ENABLE_API_DOCS is not None else not self.is_production
 
@@ -353,6 +368,8 @@ class Settings(BaseSettings):
             warnings.append("no staff notification channel configured: booking/handoff alerts only reach the admin API")
         if not self.whatsapp_configured:
             warnings.append("WhatsApp is not configured: the WhatsApp channel is disabled")
+        if self.SHOW_DEMO_LISTINGS:
+            warnings.append("SHOW_DEMO_LISTINGS is on: test listings are shown to visitors, labelled as demo data")
         return warnings
 
 

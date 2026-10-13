@@ -69,6 +69,25 @@ class ProviderDisconnected(RuntimeError):
     """The Gemini Live connection closed underneath an active call."""
 
 
+class ProviderBusy(ProviderDisconnected):
+    """Gemini refused a new Live session because the quota / rate limit is used up.
+
+    Retrying immediately only burns more quota, so the call fails at once with a
+    "busy, try again in a minute" message instead of "the connection dropped".
+    """
+
+
+_QUOTA_MARKERS = ("resource_exhausted", "resource has been exhausted", "quota", "rate limit", "too many requests", " 429")
+
+
+def is_provider_quota_error(error: BaseException) -> bool:
+    """True for Gemini 429 / RESOURCE_EXHAUSTED style failures (HTTP, SDK or WebSocket close)."""
+    if getattr(error, "code", None) == 429 or getattr(error, "status_code", None) == 429:
+        return True
+    text = f" {type(error).__name__} {error}".lower()
+    return any(marker in text for marker in _QUOTA_MARKERS)
+
+
 async def handle_website_voice(websocket: WebSocket) -> None:
     """Authenticate the browser, then bridge it to Gemini Live sessions."""
     global _active_sessions
@@ -101,6 +120,9 @@ async def handle_website_voice(websocket: WebSocket) -> None:
         await bridge.run()
     except WebSocketDisconnect:
         logger.info("Website voice client disconnected | session=%s", bridge.log_id)
+    except ProviderBusy:
+        outcome = "provider_busy"
+        await bridge.fail("busy", "Voice is busy right now, please try again in a minute.")
     except ProviderDisconnected:
         outcome = "provider_disconnected"
         await bridge.fail("provider_disconnected", "The voice service disconnected.")
@@ -239,7 +261,13 @@ class VoiceBridge:
         except Exception as error:
             # Includes failing to open the connection at all: retried a few times
             # (transient network errors), then reported as provider_disconnected.
-            logger.warning("Gemini Live connection failed (%s) | session=%s", type(error).__name__, self.log_id)
+            # The message is logged (credentials are scrubbed by the log filter) so a bad
+            # model name or a revoked key is diagnosable from the Render logs.
+            logger.warning(
+                "Gemini Live connection failed (%s: %s) | session=%s", type(error).__name__, str(error)[:200], self.log_id
+            )
+            if is_provider_quota_error(error):
+                raise ProviderBusy("Gemini Live quota or rate limit reached") from error
             return "provider_ended"
         return "provider_ended"
 

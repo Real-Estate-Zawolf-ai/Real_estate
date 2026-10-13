@@ -9,7 +9,7 @@ from starlette.concurrency import run_in_threadpool
 from app.api.ratelimit import limit_search
 from app.api.security import require_admin
 from app.schemas.property import PropertyRecord, PropertySearchRequest, PropertySearchResponse
-from app.workflows.rag import index_chunks, list_indexed_properties, search_index
+from app.workflows.rag import index_chunks, list_indexed_properties, public_metadata, public_source, search_index
 
 
 logger = logging.getLogger(__name__)
@@ -74,8 +74,8 @@ async def search_properties(request: PropertySearchRequest, http_request: Reques
         {
             "property_id": item.property_id,
             "text": item.text,
-            "metadata": item.metadata,
-            "source_file": item.source_file,
+            "metadata": public_metadata(item.metadata),
+            "source_file": public_source(item.source_file),
             "score": item.combined_score,
         }
         for item in candidates

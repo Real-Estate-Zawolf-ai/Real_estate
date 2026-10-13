@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import PureWindowsPath
 from typing import Any, Iterable
 
 from app.database.vector_db import (
@@ -63,15 +64,54 @@ def index_chunks(
         client.close()
 
 
+def public_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
+    """Listing metadata for visitors: without the ingesting machine's file paths."""
+    return {key: value for key, value in (metadata or {}).items() if key != "source_path"}
+
+
+def public_source(source_file: str | None) -> str | None:
+    """Just the file name of the source (never a directory on the ingesting machine)."""
+    return PureWindowsPath(source_file).name if source_file else None
+
+
 def _candidate_dict(candidate: SearchResult) -> dict[str, Any]:
     return {
         "property_id": candidate.property_id,
         "chunk_id": candidate.chunk_id,
         "text": candidate.text,
-        "metadata": candidate.metadata,
-        "source_file": candidate.source_file,
+        "metadata": public_metadata(candidate.metadata),
+        "source_file": public_source(candidate.source_file),
         "score": candidate.combined_score,
     }
+
+
+# Properties the public catalogue pages through (the website filters client-side).
+# Qdrant scrolls in pages; the cap keeps the response small enough for a free instance.
+CATALOGUE_PAGE_SIZE = 100
+CATALOGUE_MAX_PROPERTIES = 500
+
+# Ingestion bookkeeping that must not reach visitors (it contains local file paths).
+_INTERNAL_FIELDS = ("source_path", "file_name", "file_extension", "source_type")
+
+
+def is_demo_listing(*sources: Any) -> bool:
+    """True when a listing came from a test/demo file (see Settings.DEMO_SOURCE_MARKERS).
+
+    ``sources`` are file names or paths (Windows or POSIX); only the file name is matched.
+    """
+    markers = get_settings().demo_markers
+    for source in sources:
+        if not source:
+            continue
+        name = PureWindowsPath(str(source)).name.lower()  # handles "a\b.csv" and "a/b.csv"
+        if any(marker in name for marker in markers):
+            return True
+    return False
+
+
+def _candidate_is_demo(candidate: SearchResult) -> bool:
+    metadata = candidate.metadata or {}
+    return is_demo_listing(candidate.source_file, metadata.get("file_name"), metadata.get("source_path"))
 
 
 def search_index(
@@ -97,6 +137,13 @@ def search_index(
         )
     finally:
         client.close()
+    # Test listings never reach customers unless demo mode is on - and then they are marked.
+    if get_settings().SHOW_DEMO_LISTINGS:
+        for candidate in candidates:
+            if _candidate_is_demo(candidate):
+                candidate.metadata = {**candidate.metadata, "is_demo": True}
+    else:
+        candidates = [candidate for candidate in candidates if not _candidate_is_demo(candidate)]
     return rerank(query, candidates, top_k=top_k)
 
 
@@ -169,22 +216,35 @@ def answer_about_properties(
 def list_indexed_properties(
     *, collection_name: str | None = None, limit: int = 100
 ) -> list[dict[str, Any]]:
+    show_demo = get_settings().SHOW_DEMO_LISTINGS
+    name = _collection_name(collection_name)
+    properties: dict[str, dict[str, Any]] = {}
     client = create_client()
     try:
-        points, _ = client.scroll(
-            collection_name=_collection_name(collection_name),
-            limit=limit,
-            with_payload=True,
-            with_vectors=False,
-        )
+        offset = None
+        while len(properties) < CATALOGUE_MAX_PROPERTIES:
+            points, offset = client.scroll(
+                collection_name=name,
+                limit=limit,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            for point in points:
+                payload = getattr(point, "payload", None) or {}
+                metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+                merged = {**metadata, **{key: value for key, value in payload.items() if key != "metadata"}}
+                demo = is_demo_listing(merged.get("file_name"), merged.get("source_path"))
+                if demo and not show_demo:
+                    continue
+                property_id = str(merged.get("property_id") or merged.get("id") or point.id)
+                record = {key: value for key, value in merged.items() if key not in _INTERNAL_FIELDS}
+                record["property_id"] = property_id
+                if demo:
+                    record["is_demo"] = True
+                properties.setdefault(property_id, record)
+            if offset is None:
+                break
     finally:
         client.close()
-
-    properties: dict[str, dict[str, Any]] = {}
-    for point in points:
-        payload = getattr(point, "payload", None) or {}
-        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
-        merged = {**metadata, **{key: value for key, value in payload.items() if key != "metadata"}}
-        property_id = str(merged.get("property_id") or merged.get("id") or point.id)
-        properties.setdefault(property_id, {**merged, "property_id": property_id})
-    return list(properties.values())
+    return list(properties.values())[:CATALOGUE_MAX_PROPERTIES]

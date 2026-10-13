@@ -77,7 +77,11 @@ export class VoiceSession {
       if (this.ctx.state === 'suspended') await this.ctx.resume();
       await this.connect();
     } catch (err) {
-      this.fail(err instanceof ApiError && err.status === 503 ? 'not_configured' : 'unavailable');
+      this.fail(
+        err instanceof ApiError && err.status === 503 ? 'not_configured'
+          : err instanceof ApiError && err.status === 429 ? 'busy'
+            : 'unavailable',
+      );
     }
   }
 
@@ -92,12 +96,15 @@ export class VoiceSession {
       ws.binaryType = 'arraybuffer';
       this.ws = ws;
       let opened = false;
-      ws.onopen = () => { opened = true; resolve(); };
-      ws.onerror = () => { if (!opened) reject(new Error('ws')); };
+      // A socket that never opens (network black hole) must not leave the call stuck on "connecting".
+      const openTimer = setTimeout(() => { if (!opened) { try { ws.close(); } catch { /* ignore */ } reject(new Error('ws')); } }, 20000);
+      ws.onopen = () => { opened = true; clearTimeout(openTimer); resolve(); };
+      ws.onerror = () => { if (!opened) { clearTimeout(openTimer); reject(new Error('ws')); } };
       // Events from a socket we already replaced (reconnect) or closed are ignored.
       ws.onmessage = (e) => { if (this.ws === ws) this.handleMessage(e.data); };
       ws.onclose = (e) => {
         if (this.ws !== ws) return;
+        clearTimeout(openTimer);
         if (!opened) { this.ws = null; reject(new Error('ws')); return; } // caller reports it
         this.handleClose(e);
       };
