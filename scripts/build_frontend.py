@@ -158,6 +158,18 @@ def build(out: Path, env: dict[str, str], *, allow_insecure: bool = False) -> di
     return config
 
 
+def sample_inventory_warning(config: dict[str, object]) -> str | None:
+    """Sample listings are invented. On a real (non-local) site they must be a deliberate choice."""
+    host = urlparse(str(config["API_BASE_URL"])).hostname
+    if config["SHOW_PREVIEW_INVENTORY"] and host not in {"localhost", "127.0.0.1"}:
+        return (
+            "SHOW_PREVIEW_INVENTORY=true: this site will show INVENTED sample listings to visitors "
+            "(labelled 'Development preview'). Delete the SHOW_PREVIEW_INVENTORY variable in the host's "
+            "dashboard to show only the live catalogue."
+        )
+    return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--out", default=str(ROOT / "dist"), help="output directory (default: dist)")
@@ -167,6 +179,9 @@ def main() -> None:
         config = build(Path(args.out), dict(os.environ), allow_insecure=args.allow_insecure_api)
     except BuildError as error:
         sys.exit(f"Frontend build failed: {error}")
+    warning = sample_inventory_warning(config)
+    if warning:
+        print(f"WARNING: {warning}", file=sys.stderr)
     print(f"Built {args.out}")
     for key, value in config.items():
         print(f"  {key} = {value}")

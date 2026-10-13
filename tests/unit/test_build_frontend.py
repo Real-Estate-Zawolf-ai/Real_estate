@@ -124,3 +124,13 @@ def test_the_site_source_never_contains_credentials_or_the_real_api_url():
         if path.is_file() and path.suffix in {".js", ".html", ".css"}:
             leaks += [f"{path.name}: {m}" for m in pattern.findall(path.read_text(encoding="utf-8"))]
     assert leaks == []
+
+
+def test_sample_listings_on_a_real_site_trigger_a_loud_build_warning():
+    on = build_frontend.build_config({"SHOW_PREVIEW_INVENTORY": "true"}, API)
+    off = build_frontend.build_config({}, API)
+    local = build_frontend.build_config({"SHOW_PREVIEW_INVENTORY": "true"}, "http://127.0.0.1:8000")
+
+    assert "INVENTED sample listings" in build_frontend.sample_inventory_warning(on)
+    assert build_frontend.sample_inventory_warning(off) is None
+    assert build_frontend.sample_inventory_warning(local) is None
