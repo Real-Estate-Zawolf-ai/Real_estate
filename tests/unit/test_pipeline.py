@@ -1,3 +1,8 @@
+# Needs the offline ingestion extras (requirements-ingest.txt); skipped on the lean API install.
+import pytest as _pytest
+_pytest.importorskip("pypdf")
+_pytest.importorskip("pandas")
+
 from pathlib import Path
 
 from app.rag.ingestion.pipeline import (

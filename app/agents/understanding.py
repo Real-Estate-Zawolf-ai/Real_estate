@@ -424,6 +424,14 @@ def is_negative(text: str) -> bool:
     return bool(_NO.search(normalize_text(text)))
 
 
+# An unambiguous "stop this" (a bare "no" is not: mid-flow it often means "not that time").
+_ABORT = re.compile(r"^\s*(cancel|never\s*mind|forget it|forget about it|stop|abort|quit|exit|الغي|الغاء|خلاص|بلاش|مش عايز)\b")
+
+
+def is_abort(text: str) -> bool:
+    return bool(_ABORT.search(normalize_text(text)))
+
+
 # ---------------------------------------------------------------------------
 # Intent classification
 # ---------------------------------------------------------------------------
@@ -431,6 +439,12 @@ def is_negative(text: str) -> bool:
 INTENT_PATTERNS: list[tuple[str, str]] = [
     ("human_handoff", r"human|real person|agent|representative|sales ?(rep|person|team)|call me|talk to (someone|a person)|"
                       r"speak (to|with) (someone|a person|an agent)|مندوب|موظف|حد يكلمني|كلمني|اكلم حد|بني ادم|خدمه العملاء"),
+    ("cancel_visit", r"cancel (my |the |this |that )?(visit|viewing|appointment|booking|tour)|(visit|viewing|appointment|booking|tour) cancel|"
+                     r"reschedule|re-schedule|can't make it|cannot make it|"
+                     r"(الغ[يى]|الغاء|اكنسل|كنسل)\s*(ال)?(معاينه|ميعاد|معاد|موعد|حجز|زياره)|مش هقدر (اجي|احضر)|غير(ي)? (ال)?(معاد|ميعاد)"),
+    ("booking_status", r"(is|was|has) (my|the) (visit|viewing|appointment|booking|tour)( been)? (confirmed|approved)|"
+                       r"(status|state) of my (visit|viewing|appointment|booking)|my (booking|viewing|appointment) status|"
+                       r"(المعاينه|الميعاد|الحجز|الموعد) (اتاكد|اتأكد|اتاكدت|اتأكدت)|حاله (الحجز|المعاينه)"),
     ("schedule_visit", r"schedule|book (a )?(visit|viewing|tour)|visit|viewing|appointment|see it|tour|معاينه|موعد|ميعاد|زياره|اشوفها|احجز معاد"),
     ("payment_plan", r"payment plan|installment|instalment|down ?payment|monthly|تقسيط|اقساط|قسط|مقدم|نظام السداد"),
     ("investment", r"invest|investment|roi|rental yield|return|resale|استثمار|عائد"),

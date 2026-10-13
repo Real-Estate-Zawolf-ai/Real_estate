@@ -91,6 +91,20 @@ class GenerationResult:
     raw_response: dict[str, Any] | None = None
 
 
+# Reply when retrieval found nothing. Deliberately fixed text, never model output.
+_ARABIC_LETTER = re.compile(r"[؀-ۿ]")
+_NO_MATCH_REPLY = {
+    "en": (
+        "I couldn't find any listings that match those details right now. "
+        "You could adjust the budget, area or property type, or I can connect you with a sales advisor."
+    ),
+    "ar": (
+        "للأسف مفيش عقارات مطابقة للتفاصيل دي دلوقتي. "
+        "جرّب تغيّر الميزانية أو المنطقة أو نوع العقار، أو أوصّلك بمستشار مبيعات."
+    ),
+}
+
+
 # ---------------------------------------------------------------------------
 # Groq client
 # ---------------------------------------------------------------------------
@@ -1236,6 +1250,20 @@ def generate_response(
         temperature=temperature,
         max_tokens=max_tokens,
     )
+
+    # No evidence, no model call. Asking an LLM to answer a property question
+    # from an empty evidence block invites it to make listings up, and a prompt
+    # instruction is not a guarantee. The reply is fixed text instead.
+    if not candidates:
+        if not isinstance(customer_query, str) or not customer_query.strip():
+            raise ValueError("customer_query must not be empty.")
+        return GenerationResult(
+            answer_text=_NO_MATCH_REPLY["ar" if _ARABIC_LETTER.search(customer_query) else "en"],
+            cited_property_ids=[],
+            grounding_property_ids=[],
+            model="none (no evidence retrieved)",
+            raw_response=None,
+        )
 
     messages = build_messages(
         customer_query=customer_query,

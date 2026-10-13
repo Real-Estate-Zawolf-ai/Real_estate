@@ -1,154 +1,72 @@
-"""Alembic migration environment for the real-estate assistant."""
+"""Alembic migration environment for the real-estate assistant.
+
+Connection settings come from the application settings (``DATABASE_URL`` or the
+``POSTGRES_*`` parts), the same way the API reads them, so there is a single
+place to configure the database. Migrations run over the synchronous psycopg
+driver; for Neon use the *direct* (non-pooled) connection string.
+"""
 
 from __future__ import annotations
 
-import asyncio
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import pool
-from sqlalchemy.engine import Connection
-from sqlalchemy.ext.asyncio import async_engine_from_config
+from sqlalchemy import create_engine, pool
 
-from app.helpers.config import get_settings
 from app.database.models import Base
+from app.database.url import sync_url
 
-
-# ============================================================
-# Alembic Configuration
-# ============================================================
 
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
-
-
-# ============================================================
-# SQLAlchemy Metadata
-# ============================================================
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 
-
-# ============================================================
-# Database URL
-# ============================================================
-
-def _build_database_url() -> str:
-    """Build the PostgreSQL URL from application settings."""
-
-    settings = get_settings()
-
-    username = settings.POSTGRES_USERNAME
-    password = settings.POSTGRES_PASSWORD
-    host = settings.POSTGRES_HOST
-    port = settings.POSTGRES_PORT
-    database = settings.POSTGRES_MAIN_DATABASE
-
-    missing = []
-
-    if not username:
-        missing.append("POSTGRES_USERNAME")
-
-    if not password:
-        missing.append("POSTGRES_PASSWORD")
-
-    if not host:
-        missing.append("POSTGRES_HOST")
-
-    if not port:
-        missing.append("POSTGRES_PORT")
-
-    if not database:
-        missing.append("POSTGRES_MAIN_DATABASE")
-
-    if missing:
-        raise RuntimeError(
-            "Missing PostgreSQL configuration: "
-            + ", ".join(missing)
-        )
-
-    return (
-        f"postgresql+asyncpg://"
-        f"{username}:{password}@{host}:{port}/{database}"
-    )
+# Tables owned by LangGraph's PostgresSaver (created by its own setup()). They
+# are not part of our metadata, so autogenerate must never propose dropping them.
+_EXTERNAL_TABLES = {
+    "checkpoints",
+    "checkpoint_blobs",
+    "checkpoint_writes",
+    "checkpoint_migrations",
+}
 
 
-# ============================================================
-# Offline Migrations
-# ============================================================
+def include_object(object_, name, type_, reflected, compare_to) -> bool:
+    if type_ == "table" and name in _EXTERNAL_TABLES:
+        return False
+    return True
+
 
 def run_migrations_offline() -> None:
-    """Run migrations without creating a database connection."""
-
-    url = _build_database_url()
-
+    """Emit SQL to stdout without connecting (``alembic upgrade head --sql``)."""
     context.configure(
-        url=url,
+        url=sync_url().render_as_string(hide_password=False),
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
+        include_object=include_object,
     )
-
     with context.begin_transaction():
         context.run_migrations()
 
-
-# ============================================================
-# Migration Runner
-# ============================================================
-
-def do_run_migrations(connection: Connection) -> None:
-    """Configure Alembic and run migrations."""
-
-    context.configure(
-        connection=connection,
-        target_metadata=target_metadata,
-        compare_type=True,
-    )
-
-    with context.begin_transaction():
-        context.run_migrations()
-
-
-# ============================================================
-# Async Migrations
-# ============================================================
-
-async def run_async_migrations() -> None:
-    """Create an async engine and run migrations."""
-
-    database_url = _build_database_url()
-
-    connectable = async_engine_from_config(
-        {
-            "sqlalchemy.url": database_url,
-        },
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
-
-    async with connectable.connect() as connection:
-        await connection.run_sync(do_run_migrations)
-
-    await connectable.dispose()
-
-
-# ============================================================
-# Online Migrations
-# ============================================================
 
 def run_migrations_online() -> None:
-    """Run migrations using the async PostgreSQL engine."""
+    connectable = create_engine(sync_url(), poolclass=pool.NullPool)
+    with connectable.connect() as connection:
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            compare_type=True,
+            include_object=include_object,
+        )
+        with context.begin_transaction():
+            context.run_migrations()
+    connectable.dispose()
 
-    asyncio.run(run_async_migrations())
-
-
-# ============================================================
-# Entry Point
-# ============================================================
 
 if context.is_offline_mode():
     run_migrations_offline()

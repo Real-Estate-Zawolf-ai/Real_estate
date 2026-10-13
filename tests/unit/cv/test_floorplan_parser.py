@@ -1,3 +1,8 @@
+# Needs the offline ingestion extras (requirements-ingest.txt); skipped on the lean API install.
+import pytest as _pytest
+_pytest.importorskip("cv2")
+_pytest.importorskip("numpy")
+
 import pytest
 import numpy as np
 import cv2

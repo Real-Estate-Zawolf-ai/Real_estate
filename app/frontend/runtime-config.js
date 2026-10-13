@@ -13,6 +13,11 @@ window.APP_CONFIG = {
   // How long to wait for /chat before showing the timeout message (ms).
   REQUEST_TIMEOUT_MS: 60000,
 
+  // Show the built-in SAMPLE listings while the live catalogue is empty. Development only:
+  // a production build (scripts/build_frontend.py) sets this to false so customers never
+  // see properties that do not exist.
+  SHOW_PREVIEW_INVENTORY: true,
+
   // Show the microphone button. Voice also needs GEMINI_API_KEY on the server and an
   // https page (or localhost); otherwise the button explains why voice is unavailable.
   VOICE_ENABLED: true,

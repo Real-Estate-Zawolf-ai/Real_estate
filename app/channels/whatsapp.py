@@ -42,35 +42,49 @@ def is_valid_signature(body: bytes, signature: str | None) -> bool:
     return bool(signature and hmac.compare_digest(signature, expected))
 
 
+# Message types the assistant cannot read; the customer gets a short notice.
+_UNREADABLE_TYPES = {"image", "video", "document", "sticker", "location", "contacts", "interactive", "button"}
+
+
 def extract_incoming_messages(payload: dict[str, Any]) -> list[dict[str, str]]:
-    """Extract supported inbound WhatsApp messages from a webhook payload."""
+    """Extract inbound WhatsApp messages from a webhook payload.
+
+    Text and voice notes are returned for processing; media and other types the
+    assistant cannot read come back as ``type="unsupported"`` so the customer
+    can be told rather than ignored. Reactions, system events and delivery
+    ``statuses`` are skipped.
+    """
     messages: list[dict[str, str]] = []
     for entry in payload.get("entry", []):
         for change in entry.get("changes", []):
             value = change.get("value", {})
+            phone_number_id = (value.get("metadata") or {}).get("phone_number_id")
             for message in value.get("messages", []):
                 message_type = message.get("type")
                 sender = message.get("from")
                 message_id = message.get("id")
-                if message_type not in {"audio", "text"} or not sender or not message_id:
+                if not sender or not message_id:
                     continue
-
-                extracted = {"id": message_id, "from": sender, "type": message_type}
-                if message_type == "text":
-                    text = message.get("text", {}).get("body")
-                    if not isinstance(text, str) or not text.strip():
-                        continue
-                    extracted["text"] = text.strip()
-                if message_type == "audio":
-                    # The media id lives under the "audio" object, distinct
-                    # from the message's own id above. A background worker
-                    # needs it to download the voice note via the Graph API
-                    # before handing PCM audio to app.voice.gemini_live.
-                    media_id = message.get("audio", {}).get("id")
-                    if not media_id:
-                        continue
-                    extracted["media_id"] = media_id
-
+                if message_type in _UNREADABLE_TYPES:
+                    extracted = {"id": message_id, "from": sender, "type": "unsupported"}
+                elif message_type in {"audio", "text"}:
+                    extracted = {"id": message_id, "from": sender, "type": message_type}
+                    if message_type == "text":
+                        text = message.get("text", {}).get("body")
+                        if not isinstance(text, str) or not text.strip():
+                            continue
+                        extracted["text"] = text.strip()
+                    else:
+                        # The media id lives under the "audio" object, distinct from
+                        # the message's own id; it is needed to download the note.
+                        media_id = message.get("audio", {}).get("id")
+                        if not media_id:
+                            continue
+                        extracted["media_id"] = media_id
+                else:
+                    continue
+                if phone_number_id:
+                    extracted["phone_number_id"] = str(phone_number_id)
                 messages.append(extracted)
     return messages
 

@@ -59,9 +59,65 @@ PHRASES: dict[str, dict[str, str]] = {
         "en": "To reserve the visit, please share a phone number our advisor can reach you on.",
         "ar": "علشان أحجزلك المعاينة، ابعتلي رقم موبايل المستشار يقدر يكلمك عليه.",
     },
+    "schedule_phone_invalid": {
+        "en": "That doesn't look like a valid mobile number. Please send it like 01012345678 or +201012345678.",
+        "ar": "الرقم ده شكله مش صح. ابعته كده: 01012345678 أو +201012345678.",
+    },
+    "schedule_verify_phone": {
+        "en": "Before I reserve it, let me check your number: {phone}. Is that correct? (yes / no)",
+        "ar": "قبل ما أحجز، أتأكد من رقمك: {phone}. صح كده؟ (أيوه / لأ)",
+    },
+    "schedule_phone_rejected": {
+        "en": "No problem. What is the correct number?",
+        "ar": "ولا يهمك. إيه الرقم الصح؟",
+    },
     "schedule_confirm": {
         "en": "Please confirm: viewing of {property} on {when}. Shall I reserve it? (yes / no)",
         "ar": "تأكيد: معاينة {property} يوم {when}. أحجزها؟ (أيوه / لأ)",
+    },
+    "cancel_none": {
+        "en": "You don't have an upcoming viewing to cancel.",
+        "ar": "مفيش عندك معاينة جاية علشان نلغيها.",
+    },
+    "cancel_pick": {
+        "en": "Which viewing do you want to cancel?\n{items}\nSay its number.",
+        "ar": "عايز تلغي أنهي معاينة؟\n{items}\nقولّي رقمها.",
+    },
+    "cancel_confirm": {
+        "en": "Cancel your viewing of {property} on {when} (ref {ref})? (yes / no)",
+        "ar": "ألغي معاينة {property} يوم {when} (رقم المرجع {ref})؟ (أيوه / لأ)",
+    },
+    "cancel_done": {
+        "en": "Done - your viewing of {property} on {when} is cancelled. Tell me a new day if you'd like to rebook.",
+        "ar": "تمام - اتلغت معاينة {property} يوم {when}. لو عايز تحجز معاد تاني قولّي اليوم.",
+    },
+    "cancel_kept": {
+        "en": "OK, I've kept your viewing as it is.",
+        "ar": "تمام، سيبت المعاينة زي ما هي.",
+    },
+    "cancel_failed": {
+        "en": "Sorry, I couldn't cancel that right now. An advisor can do it for you - shall I request a call?",
+        "ar": "معلش، مقدرتش ألغيها دلوقتي. مستشار يقدر يلغيها معاك - أطلبلك مكالمة؟",
+    },
+    "booking_status_none": {
+        "en": "You don't have any viewing requests yet. Tell me which property you'd like to visit.",
+        "ar": "لسه معندكش طلبات معاينة. قولّي عايز تعاين أنهي عقار.",
+    },
+    "booking_status_pending": {
+        "en": "Your viewing of {property} on {when} (ref {ref}) is waiting for an advisor to confirm it.",
+        "ar": "طلب معاينة {property} يوم {when} (رقم المرجع {ref}) مستني تأكيد من المستشار.",
+    },
+    "booking_status_confirmed": {
+        "en": "Your viewing of {property} on {when} (ref {ref}) is confirmed.",
+        "ar": "معاينة {property} يوم {when} (رقم المرجع {ref}) اتأكدت.",
+    },
+    "booking_confirmed_notice": {
+        "en": "Good news! Your viewing of property {property} on {when} is confirmed (ref {ref}). An advisor will contact you if anything changes.",
+        "ar": "خبر حلو! معاينة العقار {property} يوم {when} اتأكدت (رقم المرجع {ref}). المستشار هيتواصل معاك لو حصل أي تغيير.",
+    },
+    "booking_cancelled_notice": {
+        "en": "We're sorry - we had to cancel your viewing of property {property} on {when} (ref {ref}). Reply here and I'll help you pick another time.",
+        "ar": "معلش - اضطرينا نلغي معاينة العقار {property} يوم {when} (رقم المرجع {ref}). ردّ هنا وأنا أساعدك تختار معاد تاني.",
     },
     "schedule_booked": {
         "en": "Your viewing request for {property} on {when} is reserved (reference {ref}). An advisor will call you to confirm it.",

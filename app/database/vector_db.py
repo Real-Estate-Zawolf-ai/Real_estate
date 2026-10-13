@@ -2,16 +2,27 @@
 
 from __future__ import annotations
 
-import os
+import logging
 from typing import Any, Iterable
 from uuid import NAMESPACE_URL, uuid5
 
 from qdrant_client import QdrantClient, models
 
-from app.rag.embeddings import EMBEDDING_DIMENSION
+from app.helpers.config import get_settings
+from app.rag.embeddings import embedding_dimension
 
 
-DEFAULT_COLLECTION = "realEstate"
+logger = logging.getLogger(__name__)
+
+# Same default as Settings.QDRANT_COLLECTION, so code and .env agree.
+DEFAULT_COLLECTION = "properties"
+
+# Seconds before a Qdrant request is abandoned (cold free-tier clusters are slow).
+QDRANT_TIMEOUT_SECONDS = 20
+
+
+class VectorDimensionMismatch(RuntimeError):
+    """The collection was built with a different embedding size than configured."""
 
 _POINT_ID_NAMESPACE = NAMESPACE_URL
 
@@ -48,18 +59,68 @@ def create_client(
     url: str | None = None,
     api_key: str | None = None,
 ) -> QdrantClient:
-    """Create a Qdrant client using the project's environment settings."""
-    endpoint = (
-        url
-        or os.getenv("QDRANT_CLUSTER_ENDPOINT")
-        or os.getenv("QDRANT_URL")
-        or "http://localhost:6333"
+    """Create a Qdrant client from the application settings (``.env`` included)."""
+    settings = get_settings()
+    return QdrantClient(
+        url=url or settings.qdrant_endpoint,
+        api_key=api_key if api_key is not None else settings.QDRANT_API_KEY,
+        timeout=QDRANT_TIMEOUT_SECONDS,
+        # The client warns when its version differs from the cluster's; the
+        # pinned range is verified against Qdrant Cloud.
+        check_compatibility=False,
     )
 
-    return QdrantClient(
-        url=endpoint,
-        api_key=api_key if api_key is not None else os.getenv("QDRANT_API_KEY"),
-    )
+
+def collection_vector_size(client: QdrantClient, collection_name: str) -> int | None:
+    """Vector size of an existing collection, or None if it does not exist."""
+    if not client.collection_exists(collection_name):
+        return None
+    vectors = client.get_collection(collection_name).config.params.vectors
+    if isinstance(vectors, dict):  # named vectors: use the only/first one
+        vectors = next(iter(vectors.values()), None)
+    return getattr(vectors, "size", None)
+
+
+def check_collection_dimension(client: QdrantClient, collection_name: str) -> None:
+    """Fail loudly if the collection's vector size is not the configured one.
+
+    Mixing embedding models silently ruins search quality (or Qdrant rejects the
+    query with an opaque error), so this is checked before indexing and at
+    readiness time.
+    """
+    size = collection_vector_size(client, collection_name)
+    expected = embedding_dimension()
+    if size is not None and size != expected:
+        raise VectorDimensionMismatch(
+            f"Collection '{collection_name}' has {size}-dimensional vectors but "
+            f"EMBEDDING_DIMENSION={expected}. Re-index into a new collection "
+            f"(scripts/ingest.py --rebuild) or set QDRANT_COLLECTION to a fresh name."
+        )
+
+
+def describe_collection() -> dict[str, Any]:
+    """Readiness probe for /health/ready; never raises, never leaks credentials."""
+    settings = get_settings()
+    report: dict[str, Any] = {"ok": False, "collection": settings.QDRANT_COLLECTION, "expected_dimension": embedding_dimension()}
+    client = None
+    try:
+        client = create_client()
+        size = collection_vector_size(client, settings.QDRANT_COLLECTION)
+        if size is None:
+            report["error"] = "collection does not exist: run scripts/ingest.py"
+        elif size != embedding_dimension():
+            report.update(actual_dimension=size, error="vector size mismatch: re-index the collection")
+        else:
+            report.update(ok=True, actual_dimension=size, points=client.count(settings.QDRANT_COLLECTION, exact=False).count)
+    except Exception as error:
+        report["error"] = f"qdrant unreachable ({type(error).__name__})"
+    finally:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+    return report
 
 
 # ---------------------------------------------------------------------------
@@ -92,10 +153,12 @@ def ensure_collection(
         client.create_collection(
             collection_name=collection_name,
             vectors_config=models.VectorParams(
-                size=EMBEDDING_DIMENSION,
+                size=embedding_dimension(),
                 distance=models.Distance.COSINE,
             ),
         )
+    else:
+        check_collection_dimension(client, collection_name)
 
     ensure_payload_indexes(client, collection_name)
 
@@ -135,9 +198,9 @@ def upsert_chunks(
         if not isinstance(metadata, dict):
             raise TypeError("Chunk metadata must be a dictionary")
 
-        if len(vector) != EMBEDDING_DIMENSION:
+        if len(vector) != embedding_dimension():
             raise ValueError(
-                f"Expected {EMBEDDING_DIMENSION}-dimensional vector, "
+                f"Expected {embedding_dimension()}-dimensional vector, "
                 f"got {len(vector)}"
             )
 

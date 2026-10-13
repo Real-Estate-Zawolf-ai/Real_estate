@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from typing import Any, Iterable
 
 from app.database.vector_db import (
@@ -12,6 +11,7 @@ from app.database.vector_db import (
     rebuild_collection,
     upsert_chunks,
 )
+from app.helpers.config import get_settings
 from app.rag.embeddings import EmbeddingModel
 from app.rag.generation import generate_response
 from app.rag.retrieval.hybrid_search import SearchResult, hybrid_search
@@ -20,7 +20,7 @@ from app.rag.retrieval.reranker import rerank
 
 
 def _collection_name(collection_name: str | None = None) -> str:
-    return collection_name or os.getenv("QDRANT_COLLECTION", DEFAULT_COLLECTION)
+    return collection_name or get_settings().QDRANT_COLLECTION or DEFAULT_COLLECTION
 
 
 def chunks_from_ingestion(result: dict[str, Any]) -> list[dict[str, Any]]:

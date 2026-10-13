@@ -1,0 +1,80 @@
+# Render Blueprint for the Aqar.ai API (free web service).
+#
+# Nothing here contains a secret: every `sync: false` value is typed into the
+# Render dashboard (Environment tab) and never committed. See DEPLOYMENT.md for
+# where each value comes from and the exact order of steps.
+#
+# Free-tier facts this file is built around:
+#   * 512 MB RAM, one instance          -> lean image, 1 uvicorn worker
+#   * sleeps after 15 min without HTTP  -> a free uptime monitor pings /health
+#   * no pre-deploy command on free     -> scripts/start.sh migrates, then serves
+#   * free Postgres expires after 30 d  -> the database lives on Neon instead
+services:
+  - type: web
+    name: aqar-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: free
+    # Frankfurt is the closest Render region to Egypt; keep Neon and Qdrant in
+    # the same region (AWS eu-central-1) to avoid cross-continent latency.
+    region: frankfurt
+    branch: deploy/free-tier
+    # Deploys happen only when you press "Manual Deploy" (or push + approve).
+    autoDeploy: false
+    healthCheckPath: /health
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: LOG_FORMAT
+        value: json
+      - key: LOG_LEVEL
+        value: INFO
+      # Render's edge is the only proxy in front of the app.
+      - key: TRUSTED_PROXY_HOPS
+        value: "1"
+      - key: EMBEDDING_BACKEND
+        value: gemini
+      - key: EMBEDDING_MODEL
+        value: gemini-embedding-001
+      - key: EMBEDDING_DIMENSION
+        value: "768"
+      - key: RERANKER_BACKEND
+        value: groq
+      - key: QDRANT_COLLECTION
+        value: properties
+      - key: VIEWING_TIMEZONE
+        value: Africa/Cairo
+      # --- secrets and per-deployment values: enter in the dashboard ---------
+      - key: DATABASE_URL            # Neon *direct* connection string (sslmode=require)
+        sync: false
+      - key: SESSION_SECRET          # python -c "import secrets; print(secrets.token_hex(32))"
+        sync: false
+      - key: ADMIN_API_KEY           # python -c "import secrets; print(secrets.token_urlsafe(32))"
+        sync: false
+      - key: CORS_ALLOWED_ORIGINS    # https://<your-pages-domain>  (comma-separate several)
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: QDRANT_URL
+        sync: false
+      - key: QDRANT_API_KEY
+        sync: false
+      # WhatsApp (leave all four unset to disable the channel)
+      - key: WHATSAPP_VERIFY_TOKEN
+        sync: false
+      - key: WHATSAPP_APP_SECRET
+        sync: false
+      - key: WHATSAPP_ACCESS_TOKEN
+        sync: false
+      - key: WHATSAPP_PHONE_NUMBER_ID
+        sync: false
+      # Staff alerts - set at least one (see DEPLOYMENT.md)
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: STAFF_WEBHOOK_URL
+        sync: false

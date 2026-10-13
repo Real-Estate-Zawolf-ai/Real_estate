@@ -1,0 +1,32 @@
+# ==========================================================================
+# Offline ingestion + local-model extras. NOT installed on the free-tier API.
+#
+# Use on a developer machine (or a paid worker) to parse PDFs/spreadsheets/
+# images, run OCR / floor-plan CV, and push the resulting chunks to Qdrant:
+#
+#   pip install -r requirements-ingest.txt
+#   python scripts/ingest.py <files...>
+#
+# It also enables the optional local sentence-transformers embedding model and
+# cross-encoder reranker (EMBEDDING_BACKEND=local / RERANKER_BACKEND=local).
+# ==========================================================================
+-r requirements.txt
+
+# Document + spreadsheet loaders
+langchain-text-splitters>=1.0,<2.0
+PyMuPDF==1.24.3
+pypdf>=5.0,<7.0
+pdfplumber>=0.11,<1.0
+unstructured[docx,pptx]
+pandas==2.2.3
+openpyxl==3.1.5
+xlrd==2.0.1
+Pillow==11.3.0
+
+# OCR + computer vision
+easyocr==1.7.2
+opencv-python-headless>=4.10,<5.0
+numpy>=1.26,<3.0
+
+# Local embedding model / cross-encoder reranker (pulls in PyTorch)
+sentence-transformers>=3.0.0

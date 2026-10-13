@@ -468,29 +468,25 @@ class TestGenerateResponse:
         )
 
     def test_generate_response_no_candidates(self):
-        fake_completion = make_fake_completion(
-            'للأسف مفيش عقارات مطابقة دلوقتي.\n'
-            '{"cited_property_ids": []}'
-        )
-
+        """No evidence means no model call: the reply is fixed text, never invented."""
         fake_client = MagicMock()
-        fake_client.chat.completions.create.return_value = fake_completion
 
-        with patch.object(
-            generation,
-            "_get_client",
-            return_value=fake_client,
-        ):
-            result = generation.generate_response(
-                "عايز فيلا في المريخ بمليون جنيه",
-                [],
-            )
+        with patch.object(generation, "_get_client", return_value=fake_client):
+            arabic = generation.generate_response("عايز فيلا في المريخ بمليون جنيه", [])
+            english = generation.generate_response("villa on Mars for one million", [])
 
-        assert result.cited_property_ids == []
-        assert result.grounding_property_ids == []
-        assert result.answer_text == (
-            "للأسف مفيش عقارات مطابقة دلوقتي."
-        )
+        fake_client.chat.completions.create.assert_not_called()
+        for result in (arabic, english):
+            assert result.cited_property_ids == []
+            assert result.grounding_property_ids == []
+        assert "مفيش عقارات مطابقة" in arabic.answer_text
+        assert "couldn't find any listings" in english.answer_text
+        # Fixed text promises nothing about prices, areas or availability.
+        assert not any(character.isdigit() for character in english.answer_text)
+
+    def test_generate_response_no_candidates_still_rejects_blank_query(self):
+        with pytest.raises(ValueError):
+            generation.generate_response("   ", [])
 
     def test_generate_response_logs_hallucinated_citation(
         self,

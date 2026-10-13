@@ -5,7 +5,7 @@ import { CONFIG } from './config.js';
 export class ApiError extends Error {
   constructor(kind, status) {
     super(kind);
-    this.kind = kind; // 'timeout' | 'network' | 'invalid' | 'server'
+    this.kind = kind; // 'timeout' | 'network' | 'invalid' | 'rate_limited' | 'server'
     this.status = status;
   }
 }
@@ -29,7 +29,7 @@ async function postJson(path, body, { timeoutMs = CONFIG.timeoutMs } = {}) {
   } finally {
     clearTimeout(timer);
   }
-  if (!res.ok) throw new ApiError(res.status === 422 ? 'invalid' : 'server', res.status);
+  if (!res.ok) throw new ApiError(res.status === 422 ? 'invalid' : res.status === 429 ? 'rate_limited' : 'server', res.status);
   try { return await res.json(); } catch { throw new ApiError('server', res.status); }
 }
 

@@ -14,6 +14,8 @@ from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
+from app.helpers.phone import normalize_phone
+
 from app.agents.understanding import (
     classify_intent,
     detect_language,
@@ -104,7 +106,10 @@ class ConversationState(TypedDict, total=False):
 
 
 # Scheduling stages during which short replies ("Saturday", "yes") continue the booking.
-SCHEDULING_STAGES = {"need_property", "need_date", "choose_slot", "need_contact", "confirm"}
+SCHEDULING_STAGES = {
+    "need_property", "need_date", "choose_slot", "need_contact", "verify_contact", "confirm",
+    "cancel_pick", "cancel_confirm",
+}
 
 # Requirement keys translated into hard metadata filters by the RAG workflow.
 FILTER_KEYS = (
@@ -129,6 +134,37 @@ def merge_requirements(previous: dict[str, Any], new: dict[str, Any]) -> dict[st
     if "min_price" in new and "max_price" not in new and merged.get("max_price", float("inf")) <= new["min_price"]:
         merged.pop("max_price", None)
     return merged
+
+
+def merge_contact(previous: dict[str, Any], contact: dict[str, Any], state: ConversationState) -> dict[str, Any]:
+    """Fold contact details from this message into the customer profile.
+
+    Phones are stored in E.164 only. A number that cannot be parsed is *not*
+    stored (``phone_invalid`` is set so the agent can say so), and any change of
+    number clears its verification: verification belongs to one exact number.
+    On WhatsApp the sender's own number is pre-verified by the channel.
+    """
+    customer = {**previous, **{key: value for key, value in contact.items() if key != "phone"}}
+
+    raw_phone = contact.get("phone")
+    if raw_phone:
+        phone = normalize_phone(raw_phone)
+        if phone is None:
+            customer["phone_invalid"] = True
+            customer.pop("phone", None)
+            customer.pop("phone_verified", None)
+        else:
+            if phone != previous.get("phone"):
+                customer["phone_verified"] = False
+                customer.pop("phone_verification_method", None)
+            customer["phone"] = phone
+            customer.pop("phone_invalid", None)
+
+    if not customer.get("phone") and str(state.get("customer_id") or "").startswith("whatsapp:"):
+        sender = normalize_phone(str(state["customer_id"]).split(":", 1)[1])
+        if sender:
+            customer.update(phone=sender, phone_verified=True, phone_verification_method="whatsapp_sender")
+    return customer
 
 
 def router(state: ConversationState) -> dict:
@@ -175,7 +211,7 @@ def router(state: ConversationState) -> dict:
     if requirements.get("delivery") and "delivery_preference" not in qualification:
         qualification["delivery_preference"] = requirements["delivery"]
 
-    customer = {**(state.get("customer") or {}), **contact}
+    customer = merge_contact(state.get("customer") or {}, contact, state)
 
     candidates = state.get("candidates") or []
     # Once a property is chosen for a viewing, "the first one" refers to time slots.
@@ -187,6 +223,8 @@ def router(state: ConversationState) -> dict:
         intent = "property_search"
     elif base == "human_handoff":
         intent = "human_handoff"
+    elif base in {"cancel_visit", "booking_status"} and not new_requirements:
+        intent = base
     elif (state.get("handoff") or {}).get("status") == "awaiting_contact" and contact.get("phone"):
         intent = "human_handoff"
     elif scheduling.get("stage") in SCHEDULING_STAGES and not new_requirements:
@@ -220,6 +258,8 @@ def router(state: ConversationState) -> dict:
 
 
 INTENT_TO_AGENT = {
+    "cancel_visit": "scheduling",
+    "booking_status": "scheduling",
     "property_search": "property",
     "property_information": "property",
     "project_information": "property",

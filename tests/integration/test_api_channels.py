@@ -20,10 +20,10 @@ from tests.conftest import live_audio, live_event, live_tool_call, live_transcri
 
 
 @pytest.fixture
-def client(stub_rag, monkeypatch):
-    settings = get_settings()
-    monkeypatch.setattr(settings, "GEMINI_API_KEY", "test-key")
-    monkeypatch.setattr(settings, "CORS_ALLOWED_ORIGINS", "http://testserver")
+def client(stub_rag, settings_env):
+    # Through the environment (not attribute patching) so tests can still call
+    # settings_env() afterwards without losing these.
+    settings_env(GEMINI_API_KEY="test-key", CORS_ALLOWED_ORIGINS="http://testserver")
     return TestClient(app)
 
 
@@ -72,12 +72,15 @@ def test_chat_issues_session_and_keeps_context(client, stub_rag):
 
 def test_tampered_session_id_starts_a_new_conversation(client, stub_rag):
     first = chat(client, "villa in Sheikh Zayed")
-    raw, signature = first["session_id"].split(".")
-    forged = f"{'0' * len(raw)}.{signature}"
+    raw, issued_at, signature = first["session_id"].split(".")
+    forged = f"{'0' * len(raw)}.{issued_at}.{signature}"
+    # A valid signature on a different id, and a valid id with a forged timestamp.
+    forged_time = f"{raw}.{'z' * len(issued_at)}.{signature}"
 
-    other = chat(client, "hello", session_id=forged)
-    assert other["session_id"] != forged
-    assert other["requirements"] == {}
+    for bad in (forged, forged_time):
+        other = chat(client, "hello", session_id=bad)
+        assert other["session_id"] != bad
+        assert other["requirements"] == {}
 
 
 def test_chat_validation_and_degraded_flag(client, stub_rag):
@@ -171,14 +174,23 @@ def test_voice_turn_runs_the_agent_graph_and_shares_text_context(client, fake_li
     assert after["selected_property_id"] == "501189810"
 
 
-def test_voice_reports_provider_disconnect(client, fake_live):
-    fake_live.install([])  # provider closes immediately after the first input
+def test_voice_reports_provider_disconnect_after_reconnects_are_exhausted(client, fake_live, settings_env):
+    settings_env(VOICE_RECONNECT_BACKOFF_SECONDS="0", VOICE_MAX_PROVIDER_RECONNECTS="2")
+    fake_live.install_sequence()  # every connection closes immediately after its first input
     token = voice_token(client)["token"]
     with client.websocket_connect(f"/website/voice?token={token}", headers={"origin": "http://testserver"}) as ws:
         assert json.loads(ws.receive()["text"])["type"] == "ready"
-        ws.send_bytes(b"\x00\x00" * 10)
-        event = json.loads(ws.receive()["text"])
+        for _ in range(6):  # buffered while the bridge reconnects
+            ws.send_bytes(b"\x00\x00" * 10)
+        kinds = []
+        while True:
+            event = json.loads(ws.receive()["text"])
+            kinds.append(event["type"])
+            if event["type"] == "error":
+                break
         assert event == {"type": "error", "code": "provider_disconnected", "message": "The voice service disconnected."}
+        assert kinds == ["reconnecting", "reconnected", "reconnecting", "reconnected", "error"]
+    assert fake_live.connections == 3  # the first connection plus two reconnects
 
 
 def test_voice_agent_failure_is_spoken_not_fatal(client, fake_live, stub_rag):

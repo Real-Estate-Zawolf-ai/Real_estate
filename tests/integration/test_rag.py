@@ -120,6 +120,6 @@ def test_rag_handles_no_matching_properties_without_citing_any(monkeypatch):
     assert result_candidates == []
     assert result.cited_property_ids == []
     assert result.grounding_property_ids == []
-    assert "no properties retrieved" in fake_client.chat.completions.create.call_args.kwargs[
-        "messages"
-    ][0]["content"]
+    # Nothing was retrieved, so the model is not asked to talk about properties at all.
+    fake_client.chat.completions.create.assert_not_called()
+    assert "couldn't find any listings" in result.answer_text

@@ -1,5 +1,3 @@
 #!/bin/sh
-set -eu
-
-alembic upgrade head
-exec uvicorn app.main:app --host 0.0.0.0 --port 8000
+# Kept for existing docker-compose setups; the real entrypoint is start.sh.
+exec sh "$(dirname "$0")/start.sh"

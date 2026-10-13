@@ -4,25 +4,28 @@ Website text, website voice (via the Gemini Live tool bridge) and WhatsApp
 all call ``conversation_service.run_turn`` with a per-customer ``thread_id``,
 so every channel shares one LangGraph workflow and one checkpointed state.
 
-Storage note: the default checkpointer is LangGraph's in-process
-``MemorySaver``. State therefore survives across turns and channels but not
-a process restart, and is not shared between multiple API workers. Pass a
-durable checkpointer (e.g. ``langgraph-checkpoint-postgres``) for production.
+Storage: with PostgreSQL configured (always, in production) the checkpointer is
+``PostgresSaver``, so conversation memory survives restarts and is shared by all
+API workers; a per-conversation advisory lock keeps two workers from running
+turns of the same conversation at once. Without a database (local development
+and tests only) it falls back to LangGraph's in-process ``MemorySaver``.
 """
 
 from __future__ import annotations
 
 import logging
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from threading import Lock
 from typing import Any
 
 from langchain_core.messages import HumanMessage
-from langgraph.checkpoint.memory import MemorySaver
 
+from app.agents.checkpointer import build_checkpointer, prune_thread, thread_lock
 from app.agents.graph import build_graph
 from app.agents.state import describe_requirements, property_label
 from app.agents.tools.crm import crm_service
+from app.database.session import is_postgres
 
 
 logger = logging.getLogger(__name__)
@@ -55,7 +58,10 @@ class TurnResult:
 class ConversationService:
 
     def __init__(self, checkpointer: Any = None) -> None:
-        self._graph = build_graph(checkpointer or MemorySaver())
+        # An explicit checkpointer (tests) keeps the service self-contained;
+        # otherwise use the shared durable one.
+        self._durable = checkpointer is None and is_postgres()
+        self._graph = build_graph(checkpointer if checkpointer is not None else build_checkpointer())
         self._locks: dict[str, Lock] = {}
         self._locks_guard = Lock()
 
@@ -66,6 +72,14 @@ class ConversationService:
     @staticmethod
     def _config(thread_id: str) -> dict:
         return {"configurable": {"thread_id": thread_id}}
+
+    def _exclusive(self, thread_id: str) -> ExitStack:
+        """One turn at a time per conversation: in this process and across workers."""
+        stack = ExitStack()
+        stack.enter_context(self._lock_for(thread_id))
+        if self._durable:
+            stack.enter_context(thread_lock(thread_id))
+        return stack
 
     def run_turn(
         self,
@@ -100,12 +114,19 @@ class ConversationService:
         if language in {"ar", "en"}:
             turn_input["language"] = language
 
-        # One turn at a time per conversation: a voice tool call and a typed
-        # message for the same customer must not interleave state updates.
-        with self._lock_for(thread_id):
+        # A voice tool call and a typed message for the same customer must not
+        # interleave state updates, even when they land on different workers.
+        with self._exclusive(thread_id):
             state = self._graph.invoke(turn_input, self._config(thread_id))
+            if self._durable:
+                prune_thread(thread_id)
 
         result = self._result(thread_id, state)
+        # The conversation is already saved; CRM bookkeeping must never fail a turn.
+        try:
+            crm_service.sync_conversation(customer_id, state)
+        except Exception:
+            logger.exception("Failed to sync CRM | thread=%s", thread_id)
         try:
             crm_service.record_interaction(
                 customer_id=customer_id,
@@ -146,12 +167,14 @@ class ConversationService:
         """Start a new search but keep the customer's profile and contact."""
         if not self.get_state(thread_id):
             return
-        with self._lock_for(thread_id):
+        with self._exclusive(thread_id):
             self._graph.update_state(
                 self._config(thread_id),
                 {"requirements": {}, "candidates": [], "selected_property": None, "scheduling": {}},
                 as_node="record_reply",
             )
+            if self._durable:
+                prune_thread(thread_id)
 
     def context_summary(self, thread_id: str, *, max_messages: int = 6) -> str:
         """Plain-text recap of a conversation, used to brief the voice model."""
@@ -177,4 +200,37 @@ class ConversationService:
         return "\n".join(lines)
 
 
-conversation_service = ConversationService()
+# ---------------------------------------------------------------------------
+# Lazy process-wide instance
+# ---------------------------------------------------------------------------
+#
+# Building the service opens the database connection pool, so it must not happen
+# at import time (tests, tooling and `alembic` import this package).
+
+_instance: ConversationService | None = None
+_instance_guard = Lock()
+
+
+def get_conversation_service() -> ConversationService:
+    global _instance
+    if _instance is None:
+        with _instance_guard:
+            if _instance is None:
+                _instance = ConversationService()
+    return _instance
+
+
+def reset_conversation_service() -> None:
+    global _instance
+    with _instance_guard:
+        _instance = None
+
+
+class _LazyConversationService:
+    """Forwards attribute access to the real service, creating it on first use."""
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(get_conversation_service(), name)
+
+
+conversation_service = _LazyConversationService()

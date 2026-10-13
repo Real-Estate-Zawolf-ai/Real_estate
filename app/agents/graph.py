@@ -1,4 +1,4 @@
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, RemoveMessage
 from langgraph.graph import StateGraph, START, END
 
 from app.agents.state import ConversationState
@@ -17,10 +17,20 @@ from .state import router, route_agent
 AGENTS = ("conversational", "property", "qualification", "scheduling", "sales", "handoff")
 
 
+# Older turns are dropped from the stored state: prompts only ever use the last
+# few messages, and an unbounded list would bloat every checkpoint.
+MAX_STORED_MESSAGES = 60
+
+
 def record_reply(state: ConversationState) -> dict:
     """Append the agent's reply to the checkpointed conversation history."""
     response = state.get("response") or ""
-    return {"messages": [AIMessage(content=response)]} if response else {}
+    update: list = [AIMessage(content=response)] if response else []
+    history = state.get("messages") or []
+    overflow = len(history) + len(update) - MAX_STORED_MESSAGES
+    if overflow > 0:
+        update = [RemoveMessage(id=message.id) for message in history[:overflow] if message.id] + update
+    return {"messages": update} if update else {}
 
 
 def build_graph(checkpointer=None):

@@ -1,0 +1,26 @@
+# Keep secrets, history and local state out of the image and the build context.
+.env
+.env.*
+!.env.example
+.git
+.gitignore
+.github
+.venv
+venv
+.remember
+.claude
+.pytest_cache
+**/__pycache__
+**/*.py[cod]
+*.sqlite3
+data/*.sqlite3
+logs
+tests
+docs
+dist
+node_modules
+*.md
+!requirements*.txt
+Dockerfile
+docker-compose.yml
+render.yaml

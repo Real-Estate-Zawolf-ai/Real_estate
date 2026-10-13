@@ -4,19 +4,56 @@
 recording fake, so agent, API, voice and WhatsApp tests exercise the real
 LangGraph orchestration offline. These are mocked-integration tests: they do
 not prove the external providers work.
+
+The suite is hermetic: it never reads the developer's ``.env`` and runs against
+a throw-away SQLite database through the same SQL code as production. Tests that
+need real PostgreSQL are marked ``postgres`` and run only when
+``TEST_DATABASE_URL`` points at one.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
+import tempfile
 from contextlib import asynccontextmanager
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 
-import app.workflows.rag as rag
-from app.agents.service import ConversationService
+# --- environment, before any `app` module reads settings ----------------------
+# Remember the real credentials (process env + .env) for the opt-in `live` tests
+# before the hermetic defaults below wipe them from this process.
+from tests.live_env import LIVE_ENV  # noqa: E402,F401
+
+from app.helpers.config import Settings, reset_settings_cache  # noqa: E402
+
+Settings.model_config["env_file"] = None  # never load the real .env in tests
+
+_TMP = Path(tempfile.mkdtemp(prefix="aqar-tests-"))
+_TEST_ENV = {
+    "APP_ENV": "test",
+    "DATABASE_URL": f"sqlite:///{(_TMP / 'test.sqlite3').as_posix()}",
+    "SESSION_SECRET": "test-session-secret-0123456789abcdef0123456789abcdef",
+    "ADMIN_API_KEY": "test-admin-key-0123456789abcdef",
+    "RATE_LIMIT_ENABLED": "false",
+    "CORS_ALLOWED_ORIGINS": "*",
+    "LOG_LEVEL": "WARNING",
+}
+for _key, _value in _TEST_ENV.items():
+    os.environ[_key] = _value
+for _key in (
+    "POSTGRES_HOST", "GROQ_API_KEY", "GEMINI_API_KEY", "QDRANT_URL", "QDRANT_API_KEY",
+    "WHATSAPP_VERIFY_TOKEN", "WHATSAPP_APP_SECRET", "WHATSAPP_ACCESS_TOKEN", "WHATSAPP_PHONE_NUMBER_ID",
+    "WHATSAPP_GATEWAY_SECRET", "STAFF_WEBHOOK_URL", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
+):
+    os.environ.pop(_key, None)
+reset_settings_cache()
+
+import app.workflows.rag as rag  # noqa: E402
+from app.agents.service import ConversationService  # noqa: E402
 
 
 LISTINGS = [
@@ -83,12 +120,36 @@ def offline_conversational_llm(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def fresh_booking_calendar():
-    """Each test starts with no viewing bookings (the store is process-global)."""
-    from app.agents.tools.scheduling import scheduling_service
+def fresh_database():
+    """Every test starts with an empty database and clean process-wide state."""
+    from app.api.ratelimit import reset_limits
+    from app.api.sessions import reset_secret_cache
+    from app.database.session import create_all, drop_all, reset_engine
 
-    scheduling_service.__init__()
+    from app.api.routes.properties import reset_catalogue_cache
+
+    reset_settings_cache()
+    reset_secret_cache()
+    reset_limits()
+    reset_catalogue_cache()
+    reset_engine()
+    drop_all()
+    create_all()
     yield
+    reset_limits()
+
+
+@pytest.fixture
+def settings_env(monkeypatch):
+    """Change settings for one test: ``settings_env(RATE_LIMIT_ENABLED="true")``."""
+
+    def apply(**values: str) -> None:
+        for key, value in values.items():
+            monkeypatch.setenv(key, str(value))
+        reset_settings_cache()
+
+    yield apply
+    reset_settings_cache()
 
 
 @pytest.fixture
@@ -176,24 +237,54 @@ class FakeLiveSession:
             yield message
 
 
+def live_go_away(seconds: str = "5s") -> SimpleNamespace:
+    """The provider announces it will end this connection soon."""
+    return SimpleNamespace(tool_call=None, go_away=SimpleNamespace(time_left=seconds), server_content=None)
+
+
+def live_tool_cancellation(*call_ids: str) -> SimpleNamespace:
+    """The customer interrupted: these pending tool calls are no longer wanted."""
+    return SimpleNamespace(
+        tool_call=None, go_away=None, server_content=None,
+        tool_call_cancellation=SimpleNamespace(ids=list(call_ids)),
+    )
+
+
 @pytest.fixture
 def fake_live(monkeypatch):
-    """Patch the voice bridge to talk to a scripted FakeLiveSession."""
+    """Patch the voice bridge to talk to scripted FakeLiveSessions.
+
+    ``install(turns)`` serves one session for every connection;
+    ``install_sequence(a, b, ...)`` serves a different script per connection
+    (a connection beyond the list gets an empty, immediately-closing session).
+    """
     import app.channels.website as website
 
-    holder = SimpleNamespace(session=None)
+    holder = SimpleNamespace(session=None, sessions=[], connections=0, instructions=[])
 
-    def install(turns):
-        session = FakeLiveSession(turns)
-        holder.session = session
-
+    def patch(factory):
         @asynccontextmanager
         async def connect(system_instruction=None, **_):
+            holder.connections += 1
+            holder.instructions.append(system_instruction)
+            session = factory(holder.connections)
             session.system_instruction = system_instruction
+            holder.session = session
+            holder.sessions.append(session)
             yield session
 
         monkeypatch.setattr(website, "connect_live_session", connect)
+
+    def install(turns):
+        session = FakeLiveSession(turns)
+        patch(lambda _n: session)
+        holder.session = session
         return session
 
+    def install_sequence(*scripts):
+        patch(lambda n: FakeLiveSession(scripts[n - 1] if n <= len(scripts) else []))
+        return holder
+
     holder.install = install
+    holder.install_sequence = install_sequence
     return holder

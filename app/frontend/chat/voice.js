@@ -133,6 +133,13 @@ export class VoiceSession {
         this.stopPlayback();
         this.setState('listening');
         break;
+      case 'reconnecting':
+        // The server is re-establishing the voice provider; the call stays open.
+        this.setState('connecting');
+        break;
+      case 'reconnected':
+        this.setState('listening');
+        break;
       case 'turn_complete':
         this.dropAudio = false;
         this.onTurnComplete?.();

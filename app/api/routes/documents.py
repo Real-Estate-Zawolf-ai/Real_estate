@@ -12,11 +12,26 @@ from starlette.concurrency import run_in_threadpool
 
 from app.api.security import require_admin
 from app.helpers.config import get_settings
-from app.rag.ingestion.pipeline import ingest_file, is_supported
 from app.workflows.rag import chunks_from_ingestion, index_chunks
 
 
 router = APIRouter(prefix="/documents", tags=["documents"])
+
+
+def _load_ingestion():
+    """Import the parsing stack on demand.
+
+    PDF/OCR/spreadsheet parsers live in ``requirements-ingest.txt`` and are not
+    installed on the lean production API, which must still boot without them.
+    """
+    try:
+        from app.rag.ingestion.pipeline import ingest_file, is_supported
+    except ImportError as error:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="Document ingestion is not installed on this deployment; run scripts/ingest.py offline",
+        ) from error
+    return ingest_file, is_supported
 
 
 @router.post("/ingest", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_admin)])
@@ -24,6 +39,7 @@ async def ingest_document(
     file: UploadFile = File(...),
     image_kind: str | None = Form(default=None),
 ) -> dict[str, Any]:
+    ingest_file, is_supported = _load_ingestion()
     filename = Path(file.filename or "upload").name
     if not is_supported(filename):
         raise HTTPException(status_code=415, detail="Unsupported document type")

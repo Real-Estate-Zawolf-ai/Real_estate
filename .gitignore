@@ -52,3 +52,7 @@ __pycache__/
 
 # macOS
 .DS_Store
+
+# Local development database and build output
+data/*.sqlite3*
+dist/

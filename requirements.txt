@@ -1,88 +1,42 @@
-# ==========================================
-# API & Application
-# ==========================================
+# ==========================================================================
+# Aqar.ai - production runtime dependencies
+#
+# This is the exact set installed on Render / in the Docker image. It is
+# deliberately lean: no PyTorch, OCR or computer-vision stack, so the API fits
+# a 512 MB free instance. Embeddings and reranking run through hosted APIs
+# (Gemini embeddings + Groq reranker) - see DEPLOYMENT.md.
+#
+#   requirements-ingest.txt  document/OCR/CV ingestion + local ML models (offline use)
+#   requirements-dev.txt     tests
+# ==========================================================================
 
-fastapi==0.110.2
-uvicorn[standard]==0.29.0
-python-multipart==0.0.9
-python-dotenv==1.0.1
-pydantic-settings==2.2.1
+# --- API ------------------------------------------------------------------
+fastapi==0.136.1
+uvicorn[standard]==0.46.0
+python-multipart==0.0.31
+pydantic==2.13.5
+pydantic-settings==2.14.2
+httpx==0.28.1
 tzdata>=2024.1
-aiofiles==23.2.1
 
-
-# ==========================================
-# LLM & AI
-# ==========================================
-
-langchain-core>=1.0,<2.0
-langchain-text-splitters>=1.0,<2.0
+# --- Agents (LangGraph) ----------------------------------------------------
 langgraph==1.2.12
-openai==1.75.0
-cohere==5.13.2
-groq==0.31.0
-google-genai==2.23.0
-voyageai==0.1.6
+langchain-core>=1.0,<2.0
+langgraph-checkpoint-postgres>=3.0,<4.0
 
-sentence-transformers>=3.0.0
-# ==========================================
-# Document & File Processing
-# ==========================================
+# --- Database (Neon PostgreSQL) -------------------------------------------
+SQLAlchemy==2.0.43
+alembic==1.16.5
+psycopg[binary,pool]>=3.2.9,<4.0
 
-PyMuPDF==1.24.3
-pypdf>=5.0,<7.0
-pdfplumber>=0.11,<1.0
-unstructured[docx,pptx]
-pandas==2.2.3
-numpy>=1.26,<3.0
-openpyxl==3.1.5
-xlrd==2.0.1
-Pillow==11.3.0
-opencv-python-headless>=4.10,<5.0
-
-
-# ==========================================
-# Vector Database & Retrieval
-# ==========================================
-
-qdrant-client==1.10.1
-pgvector==0.4.0
-nltk==3.9.1
+# --- Retrieval (Qdrant Cloud) ----------------------------------------------
+# <1.16: the code uses QdrantClient.search(), which later releases removed.
+qdrant-client>=1.10,<1.16
 rank-bm25==0.2.2
 
+# --- LLM / voice providers -------------------------------------------------
+groq==0.31.0
+google-genai>=2.20,<3.0
 
-# ==========================================
-# Database
-# ==========================================
-
-motor==3.4.0
-pydantic-mongo==2.3.0
-SQLAlchemy==2.0.36
-asyncpg==0.30.0
-alembic==1.14.0
-psycopg2-binary==2.9.10
-
-
-# ==========================================
-# Monitoring & Metrics
-# ==========================================
-
+# --- Observability ---------------------------------------------------------
 prometheus-client==0.21.1
-starlette-exporter==0.23.0
-fastapi-health==0.4.0
-
-# ==========================================
-# OCR
-# ==========================================
-easyocr==1.7.2
-
-# ==========================================
-# Voice (Gemini Live)
-# ==========================================
-google-genai
-
-# ==========================================
-# Testing
-# ==========================================
-pytest>=8.0,<9.0
-httpx>=0.27,<1.0

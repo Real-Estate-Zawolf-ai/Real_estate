@@ -5,6 +5,12 @@ from app.rag.retrieval.reranker import rerank, rerank_with_trace
 from app.rag.retrieval.hybrid_search import SearchResult
 
 
+@pytest.fixture(autouse=True)
+def local_cross_encoder_backend(settings_env):
+    """These tests cover the cross-encoder path; the default backend is Groq."""
+    settings_env(RERANKER_BACKEND="local")
+
+
 @pytest.fixture
 def candidates():
     return [

@@ -353,7 +353,7 @@ export function initChatbot({ resolvePropertyHref = () => null, appRoot = null }
     } else if (m.kind === 'text') {
       stack.append(bubble(m.text), chipsEl(m, lang));
     } else if (m.kind === 'error') {
-      const key = { timeout: 'errTimeout', invalid: 'errInvalid', network: 'errNetwork' }[m.errorKind] || 'errServer';
+      const key = { timeout: 'errTimeout', invalid: 'errInvalid', network: 'errNetwork', rate_limited: 'errRate' }[m.errorKind] || 'errServer';
       stack.append(h('div', { class: 'cb-bubble cb-bubble--error', role: 'alert', dir: 'auto' }, h('p', { text: t(lang, key) }),
         m.req && h('button', { type: 'button', class: 'cb-btn cb-btn--sm', text: t(lang, 'retry'), onclick: () => retry(m) })));
     } else if (m.kind === 'compare') {

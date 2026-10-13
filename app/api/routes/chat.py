@@ -3,11 +3,17 @@
 import logging
 import time
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 from starlette.concurrency import run_in_threadpool
 
 from app.agents.service import TurnResult, conversation_service
-from app.api.sessions import issue_session_id, verify_session_id, website_thread
+from app.api.ratelimit import limit_chat, limit_session_create
+from app.api.sessions import (
+    inspect_session_id,
+    issue_session_id,
+    needs_refresh,
+    website_thread,
+)
 from app.observability.metrics import record_request
 from app.schemas.interaction import ChatRequest, ChatResponse, SessionRequest
 
@@ -17,13 +23,23 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/chat", tags=["chat"])
 
 
-def resolve_session(session_id: str | None) -> tuple[str, str]:
-    """Return (signed id, raw id); unknown or tampered ids start a new session."""
-    raw = verify_session_id(session_id)
-    if raw is None:
-        session_id = issue_session_id()
-        raw = verify_session_id(session_id)
-    return session_id, raw
+def resolve_session(session_id: str | None, request: Request | None = None) -> tuple[str, str]:
+    """Return (signed id, raw id).
+
+    A valid id continues its conversation (re-signed when it is a day old so
+    active customers do not expire); an unknown, tampered or expired id starts a
+    new one - creating sessions is rate-limited per client.
+    """
+    verified = inspect_session_id(session_id)
+    if verified is not None:
+        raw, age = verified
+        return (issue_session_id(raw) if needs_refresh(age) else session_id), raw
+    if request is not None:
+        limit_session_create(request)
+    session_id = issue_session_id()
+    verified = inspect_session_id(session_id)
+    assert verified is not None
+    return session_id, verified[0]
 
 
 def to_response(session_id: str, result: TurnResult) -> ChatResponse:
@@ -47,8 +63,9 @@ def to_response(session_id: str, result: TurnResult) -> ChatResponse:
 
 
 @router.post("", response_model=ChatResponse)
-async def chat(request: ChatRequest) -> ChatResponse:
-    session_id, raw = resolve_session(request.session_id)
+async def chat(request: ChatRequest, http_request: Request) -> ChatResponse:
+    session_id, raw = resolve_session(request.session_id, http_request)
+    limit_chat(http_request, raw)
     thread_id = website_thread(raw)
     started = time.monotonic()
     try:
@@ -74,8 +91,9 @@ async def chat(request: ChatRequest) -> ChatResponse:
 
 
 @router.post("/reset", status_code=status.HTTP_200_OK)
-async def reset_search(request: SessionRequest) -> dict[str, str]:
+async def reset_search(request: SessionRequest, http_request: Request) -> dict[str, str]:
     """Clear search filters and results; keep the customer's profile."""
-    session_id, raw = resolve_session(request.session_id)
+    session_id, raw = resolve_session(request.session_id, http_request)
+    limit_chat(http_request, raw)
     await run_in_threadpool(conversation_service.reset_search, website_thread(raw))
     return {"session_id": session_id, "status": "reset"}

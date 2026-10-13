@@ -16,6 +16,13 @@ def turn(service, thread_id, text, **kwargs):
     return service.run_turn(thread_id, text, **kwargs)
 
 
+def verify_phone(service, thread_id, number="01012345678"):
+    """Give a number and confirm the read-back, as a real customer must."""
+    readback = turn(service, thread_id, f"my number is {number}")
+    assert readback.scheduling_stage == "verify_contact"
+    return turn(service, thread_id, "yes")
+
+
 def test_text_property_search_returns_real_workflow_results(service, thread_id, stub_rag):
     result = turn(service, thread_id, "I want a 3 bedroom apartment in New Cairo under 30 million")
 
@@ -68,7 +75,11 @@ def test_viewing_is_only_reserved_after_explicit_confirmation(service, thread_id
 
     contact = turn(service, thread_id, "the first")
     assert contact.scheduling_stage == "need_contact"
-    confirm = turn(service, thread_id, "0101 234 5678")
+    readback = turn(service, thread_id, "0101 234 5678")
+    assert readback.scheduling_stage == "verify_contact"
+    assert "0101 234 5678" in readback.response  # the number is read back to the customer
+    assert readback.appointment is None
+    confirm = turn(service, thread_id, "yes that's right")
     assert confirm.scheduling_stage == "confirm"
     assert confirm.appointment is None  # nothing booked yet
 
@@ -85,7 +96,7 @@ def test_declining_confirmation_books_nothing(service, thread_id, stub_rag):
     turn(service, thread_id, "book a viewing for the second one")
     turn(service, thread_id, "tomorrow")
     turn(service, thread_id, "the first")
-    turn(service, thread_id, "my number is 01012345678")
+    verify_phone(service, thread_id)
     result = turn(service, thread_id, "no")
 
     assert result.appointment is None
@@ -98,7 +109,7 @@ def test_taken_slot_is_not_offered_again(service, stub_rag):
         turn(service, thread, "visit the first one")
         offered = turn(service, thread, "tomorrow")
         turn(service, thread, "the first")
-        turn(service, thread, "my number is 01012345678")
+        verify_phone(service, thread)
         return offered, turn(service, thread, "yes")
 
     first_offer, first_booking = book(f"web:{uuid4().hex}")
@@ -197,8 +208,9 @@ def test_new_time_replaces_earlier_choice_before_confirmation(service, thread_id
     turn(service, thread_id, "11am")
     changed = turn(service, thread_id, "actually make it 3pm")  # while we wait for a phone number
     assert changed.scheduling_stage == "need_contact"
-    confirm = turn(service, thread_id, "01012345678")
-    assert "15:00" in confirm.response
+    verify_phone(service, thread_id)
+    confirm = turn(service, thread_id, "I changed my mind, make it 4pm")
+    assert "16:00" in confirm.response
 
 
 def test_booking_survives_phone_digits_and_stray_numbers(service, thread_id, stub_rag):
@@ -206,11 +218,12 @@ def test_booking_survives_phone_digits_and_stray_numbers(service, thread_id, stu
     turn(service, thread_id, "book a viewing of the first one tomorrow")
     turn(service, thread_id, "11am")
     searches_before = len(stub_rag.searches)
-    confirm = turn(service, thread_id, "My phone number is 010 123 45678")
+    readback = turn(service, thread_id, "My phone number is 010 123 45678")
 
-    assert confirm.scheduling_stage == "confirm"
+    assert readback.scheduling_stage == "verify_contact"
     assert len(stub_rag.searches) == searches_before  # no accidental new search
-    assert "max_price" not in confirm.requirements
+    assert "max_price" not in readback.requirements
+    assert turn(service, thread_id, "yes").scheduling_stage == "confirm"
     assert turn(service, thread_id, "yes").appointment["status"] == "pending_confirmation"
 
 
