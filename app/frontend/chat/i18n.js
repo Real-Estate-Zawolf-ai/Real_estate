@@ -1,7 +1,7 @@
 // UI strings (Arabic, Egyptian-leaning, and English). Property facts never come from here.
 const S = {
   en: {
-    name: 'Atelier Assistant',
+    name: 'betak',
     statusChecking: 'Checking availability…', statusUp: 'Available', statusDown: 'Temporarily unavailable',
     launcher: 'Open the AI property assistant', launcherLabel: 'Ask our AI assistant',
     close: 'Close assistant', minimize: 'Minimize assistant', expand: 'Expand assistant',
@@ -48,7 +48,7 @@ const S = {
     voice_max_duration: 'The voice session reached its time limit. Start again to continue.',
   },
   ar: {
-    name: 'مساعد أتيليه',
+    name: 'بيتك',
     statusChecking: 'بنتأكد من التوفر…', statusUp: 'متاح', statusDown: 'غير متاح دلوقتي',
     launcher: 'افتح مساعد العقارات الذكي', launcherLabel: 'اسأل المساعد الذكي',
     close: 'إغلاق المساعد', minimize: 'تصغير المساعد', expand: 'تكبير المساعد',
